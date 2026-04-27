@@ -36,7 +36,128 @@ AIRE (Agent Interchange Runtime Envelope) is an application-layer protocol for a
 
 ## 2. Wire format
 
-*TODO (v0.1):* Frame envelope encoding, length prefixes, varints, version byte. Target: self-delimiting frames so multiple frames can share a QUIC stream cleanly.
+Every AIRE message is a self-delimiting *frame*. Frames are sent as the byte-stream payload of QUIC streams (RFC 9000 §2.1). A single QUIC stream MAY carry one or more frames concatenated end-to-end with no separators.
+
+### 2.1 Frame envelope
+
+```
++--------+--------+----------+-------------+----------+
+| Type   | Flags  | OpID     | PayloadLen  | Payload  |
+| 1 byte | 1 byte | varint   | varint      | bytes    |
++--------+--------+----------+-------------+----------+
+```
+
+| Field      | Size               | Description                                                                                                                                            |
+|------------|--------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Type       | 1 byte (uint8)     | Frame type code (see §3).                                                                                                                              |
+| Flags      | 1 byte (uint8)     | Type-specific flags. Reserved bits MUST be zero on send and MUST be ignored on receive.                                                                |
+| OpID       | varint (§2.2)      | Operation identifier scoped to the connection. Value `0` is reserved for connection-level frames (HELLO, GOODBYE). Operation-scoped frames MUST use a non-zero OpID. |
+| PayloadLen | varint (§2.2)      | Length of the Payload field, in bytes.                                                                                                                 |
+| Payload    | `PayloadLen` bytes | Frame-type-specific payload (see §3).                                                                                                                  |
+
+All multi-byte integers are encoded in network byte order (big-endian).
+
+### 2.2 Variable-length integers (varint)
+
+AIRE varints reuse the QUIC variable-length integer encoding (RFC 9000 §16). The two most significant bits of the first byte indicate the total length:
+
+| 2 MSB | Length  | Value range                              |
+|-------|---------|------------------------------------------|
+| `00`  | 1 byte  | 0 to 63 (2⁶ − 1)                         |
+| `01`  | 2 bytes | 0 to 16 383 (2¹⁴ − 1)                    |
+| `10`  | 4 bytes | 0 to 1 073 741 823 (2³⁰ − 1)             |
+| `11`  | 8 bytes | 0 to 4 611 686 018 427 387 903 (2⁶² − 1) |
+
+The remaining bits hold the value, big-endian. Senders SHOULD use the shortest encoding that fits the value. Receivers MUST accept any valid encoding — longer-than-minimal encodings are tolerated for forward compatibility, though senders are not required to emit them.
+
+### 2.3 Self-delimiting concatenation
+
+Multiple frames MAY be concatenated within a single QUIC stream. A receiver parses frames sequentially: read Type, Flags, OpID, PayloadLen, then exactly PayloadLen bytes of Payload. The next frame begins immediately at the byte position following the previous frame's Payload.
+
+A QUIC stream MUST NOT close (FIN) mid-frame. An implementation that detects a partial frame at FIN MUST treat the connection as malformed and emit ERROR (§3) before tearing down.
+
+### 2.4 Operation lifetime within a stream
+
+By convention, all frames belonging to a single Operation share one QUIC stream and the same OpID. The Operation begins with an INVOKE frame (§3) and terminates with one of:
+
+- a STREAM frame indicating end-of-operation (see §3),
+- a CANCEL frame, or
+- an ERROR frame indicating a terminal error.
+
+After the terminal frame for an Operation, the QUIC stream's send-side MUST be closed (FIN). The receive-side closes when the peer's terminal frame arrives.
+
+Connection-level frames (HELLO, GOODBYE; OpID = 0) travel on a dedicated control stream, defined in §4.
+
+### 2.5 Maximum frame size
+
+Implementations MUST accept frames whose PayloadLen is up to 65 536 bytes (2¹⁶) without prior negotiation. Implementations MAY accept larger frames; senders SHOULD NOT exceed 1 048 576 bytes (2²⁰) without first negotiating a higher `max_frame_size` capability via CAPABILITY (§4). Receivers MAY emit ERROR with code `FRAME_TOO_LARGE` if a received frame exceeds their configured limit.
+
+### 2.6 Test vectors
+
+The following byte sequences are canonical encodings. Implementations MUST round-trip these byte-for-byte.
+
+#### Vector 1 — empty HELLO
+
+A connection-level HELLO frame with no payload.
+
+```
+01 00 00 00
+```
+
+| Field      | Bytes    | Decoded               |
+|------------|----------|-----------------------|
+| Type       | `01`     | HELLO (0x01)          |
+| Flags      | `00`     | 0                     |
+| OpID       | `00`     | 0 (connection-level)  |
+| PayloadLen | `00`     | 0                     |
+| Payload    | *(none)* | empty                 |
+
+#### Vector 2 — INVOKE with short payload
+
+An INVOKE frame on Operation 42, payload `"hi"` (UTF-8).
+
+```
+03 00 2A 02 68 69
+```
+
+| Field      | Bytes   | Decoded                |
+|------------|---------|------------------------|
+| Type       | `03`    | INVOKE (0x03)          |
+| Flags      | `00`    | 0                      |
+| OpID       | `2A`    | 42 (1-byte varint)     |
+| PayloadLen | `02`    | 2                      |
+| Payload    | `68 69` | `"hi"`                 |
+
+#### Vector 3 — STREAM with 4-byte OpID and 2-byte length
+
+A STREAM frame on Operation 16 384, payload of 100 bytes (all `0xAB`).
+
+```
+04 00 80 00 40 00 40 64
+AB AB AB ... (100 × 0xAB)
+```
+
+| Field      | Bytes           | Decoded                    |
+|------------|-----------------|----------------------------|
+| Type       | `04`            | STREAM (0x04)              |
+| Flags      | `00`            | 0                          |
+| OpID       | `80 00 40 00`   | 16 384 (4-byte varint)     |
+| PayloadLen | `40 64`         | 100 (2-byte varint)        |
+| Payload    | 100 × `AB`      | 100 bytes                  |
+
+Total frame length: 108 bytes.
+
+#### Vector 4 — two empty HELLO frames concatenated
+
+Demonstrates self-delimiting concatenation. The byte sequence parses as two consecutive HELLO frames.
+
+```
+01 00 00 00 01 00 00 00
+```
+
+A receiver MUST parse this as two complete HELLO frames, not as one malformed frame.
+
+> **Note.** Additional vectors covering each frame type, edge-case varint lengths, and a machine-readable JSON encoding will be added under issue [#4 (test vectors for wire format)](https://github.com/aire-protocol/aire-spec/issues/4).
 
 ## 3. Frame types
 
