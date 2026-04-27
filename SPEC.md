@@ -157,7 +157,78 @@ Demonstrates self-delimiting concatenation. The byte sequence parses as two cons
 
 A receiver MUST parse this as two complete HELLO frames, not as one malformed frame.
 
-> **Note.** Additional vectors covering each frame type, edge-case varint lengths, and a machine-readable JSON encoding will be added under issue [#4 (test vectors for wire format)](https://github.com/aire-protocol/aire-spec/issues/4).
+#### Vector 5 — CANCEL on operation 5
+
+```
+05 00 05 00
+```
+
+| Field      | Bytes | Decoded             |
+|------------|-------|---------------------|
+| Type       | `05`  | CANCEL (0x05)       |
+| Flags      | `00`  | 0                   |
+| OpID       | `05`  | 5 (1-byte varint)   |
+| PayloadLen | `00`  | 0                   |
+| Payload    | —     | empty (v0.1 CANCEL has no payload; reason codes are reserved for v0.3) |
+
+#### Vector 6 — GOODBYE (connection-level)
+
+```
+09 00 00 00
+```
+
+| Field      | Bytes | Decoded                   |
+|------------|-------|---------------------------|
+| Type       | `09`  | GOODBYE (0x09)            |
+| Flags      | `00`  | 0                         |
+| OpID       | `00`  | 0 (connection-level)      |
+| PayloadLen | `00`  | 0                         |
+| Payload    | —     | empty                     |
+
+#### Vector 7 — INVOKE with 8-byte varint OpID
+
+Exercises the maximum varint length for OpID (here, 2⁶⁰).
+
+```
+03 00 D0 00 00 00 00 00 00 00 00
+```
+
+| Field      | Bytes                          | Decoded                              |
+|------------|--------------------------------|--------------------------------------|
+| Type       | `03`                           | INVOKE (0x03)                        |
+| Flags      | `00`                           | 0                                    |
+| OpID       | `D0 00 00 00 00 00 00 00`      | 1 152 921 504 606 846 976 (2⁶⁰)      |
+| PayloadLen | `00`                           | 0                                    |
+| Payload    | —                              | empty                                |
+
+Total: 11 bytes.
+
+### 2.7 Machine-readable test vectors
+
+A canonical JSON representation of every vector in §2.6 (and §4.7) is published at [`vectors/v0.1.json`](./vectors/v0.1.json) in this repository. Conformance suites SHOULD load this file directly rather than re-encoding the hex tables above. The JSON schema:
+
+```json
+{
+  "version": "v0.1",
+  "vectors": [
+    {
+      "id": "empty-hello",
+      "section": "§2.6",
+      "description": "Connection-level HELLO frame with no payload",
+      "encoded_hex": "01000000",
+      "frame": {
+        "type": 1,
+        "type_name": "HELLO",
+        "flags": 0,
+        "op_id": 0,
+        "payload_hex": ""
+      }
+    }
+  ]
+}
+```
+
+Every implementation MUST round-trip every vector byte-for-byte. New vectors are added as the spec evolves; the JSON is the authoritative wire-level conformance contract.
 
 ## 3. Frame types
 
