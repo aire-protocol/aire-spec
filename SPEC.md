@@ -2,7 +2,7 @@
 
 > **Author:** Etienne de Bruin ([@etdebruin](https://github.com/etdebruin)).
 > **Status:** Draft. Breaking changes expected until v1.0.
-> **Last updated:** 2026-04-26.
+> **Last updated:** 2026-04-27.
 
 ## 1. Introduction
 
@@ -284,16 +284,57 @@ After a successful handshake, peers MAY open additional QUIC streams to begin op
 
 ## 6. URI scheme
 
+AIRE addresses are expressed as URIs with the `aire` scheme.
+
+### 6.1 Grammar
+
+The grammar follows RFC 3986. In ABNF:
+
 ```
-aire://<node-id>[/<agent-id>[/<operation>]]
+aire-uri    = "aire://" authority [ "/" agent-id [ "/" operation ] ]
+authority   = host [ ":" port ]
+host        = <host as defined by RFC 3986 §3.2.2>
+port        = <port as defined by RFC 3986 §3.2.3>
+agent-id    = 1*pchar
+operation   = 1*pchar
+pchar       = <as defined by RFC 3986 §3.3>
 ```
 
-- `aire://` — protocol scheme
-- `<node-id>` — opaque, globally unique node identifier
-- `<agent-id>` — agent identifier scoped to the node
-- `<operation>` — optional named operation
+`host` MAY be a DNS name, an IPv4 dotted-quad literal, or a bracketed IPv6 literal. `agent-id` and `operation` are case-sensitive UTF-8 strings, percent-encoded as required by RFC 3986.
 
-DNS resolution and discovery: *TODO*.
+### 6.2 Default port
+
+The default AIRE port is **`4433/udp`** (QUIC). When `port` is omitted from the URI, implementations MUST connect to UDP/4433.
+
+> Port `4433` is unassigned by IANA at this time and is conventional in QUIC-based tooling. Once AIRE adoption warrants, a dedicated IANA assignment will be requested and the default revised in a major version bump.
+
+### 6.3 Resolution
+
+Given an `aire://` URI, the connecting peer:
+
+1. Resolves `host` to one or more IP addresses (DNS A/AAAA, IPv4 literal, or IPv6 literal).
+2. Opens a QUIC connection to a resolved IP on `port` (default `4433/udp`).
+3. Proceeds with the §4 handshake.
+4. Uses `agent-id` and `operation` (when present) inside the INVOKE frame's payload (defined in §3); these components are not transmitted at the QUIC layer.
+
+### 6.4 Examples
+
+| URI                                          | Interpretation                                        |
+|----------------------------------------------|-------------------------------------------------------|
+| `aire://node1.example.com`                   | host `node1.example.com`, default port 4433           |
+| `aire://node1.example.com:5000`              | host `node1.example.com`, port 5000                   |
+| `aire://10.0.0.5`                            | IPv4 literal `10.0.0.5`, port 4433                    |
+| `aire://[2001:db8::1]:5000`                  | IPv6 literal, port 5000                               |
+| `aire://node1.example.com/inbox`             | agent `inbox` on the host                             |
+| `aire://node1.example.com/inbox/answer`      | operation `answer` on agent `inbox`                   |
+
+### 6.5 Equivalence
+
+Two AIRE URIs are equivalent if and only if their `host`, `port`, `agent-id`, and `operation` components match after URI normalization (RFC 3986 §6). DNS-name hosts are case-insensitive; `agent-id` and `operation` are case-sensitive.
+
+### 6.6 Future work
+
+Opaque node identifiers (host components without DNS resolution) and a standardized discovery mechanism are reserved for v0.2. v0.1 implementations rely on DNS or IP literals for addressing.
 
 ## 7. Cancellation semantics
 
