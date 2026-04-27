@@ -1,5 +1,6 @@
 # AIRE Specification — Draft v0.1
 
+> **Author:** Etienne de Bruin ([@etdebruin](https://github.com/etdebruin)).
 > **Status:** Draft. Breaking changes expected until v1.0.
 > **Last updated:** 2026-04-26.
 
