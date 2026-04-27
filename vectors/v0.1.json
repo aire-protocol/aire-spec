@@ -33,13 +33,13 @@
       "id": "stream-large-opid",
       "section": "§2.6 vector 3",
       "description": "STREAM on operation 16384 with a 100-byte payload of 0xAB",
-      "encoded_hex": "0400800040004064abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+      "encoded_hex": "0400800040004064abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
       "frame": {
         "type": 4,
         "type_name": "STREAM",
         "flags": 0,
         "op_id": 16384,
-        "payload_hex": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
+        "payload_hex": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
       }
     },
     {
