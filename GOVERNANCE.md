@@ -2,7 +2,7 @@
 
 ## Status
 
-AIRE is currently led by a BDFL (Benevolent Dictator For Life): the project founder.
+AIRE is currently led by a BDFL (Benevolent Dictator For Life): [Etienne de Bruin](https://github.com/etdebruin).
 
 This is intentional. Protocols designed by committee tend to ship slowly and badly. The goal is to get to a working v1.0 fast, prove adoption, then transition to neutral governance.
 
