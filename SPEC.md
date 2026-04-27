@@ -177,7 +177,106 @@ Frame codes 0x80+ reserved for vendor extensions; 0x10–0x7F reserved for futur
 
 ## 4. Handshake
 
-*TODO (v0.1):* `HELLO` exchange flow, capability negotiation, version selection.
+Every AIRE connection begins with a HELLO exchange on the *control stream*. The control stream is the first client-initiated bidirectional QUIC stream (stream ID `0` under QUIC's standard stream-ID numbering, RFC 9000 §2.1). Both peers MUST send exactly one HELLO frame as the first frame on the control stream, before sending any other frame on any stream.
+
+A peer MUST NOT send a second HELLO on the same connection. A second HELLO MUST be treated as a protocol violation: the receiver emits ERROR with code `PROTOCOL_VIOLATION` (§4.6) and closes the connection.
+
+### 4.1 HELLO frame payload
+
+The HELLO frame's Payload (see §2.1) carries the following fields, in order:
+
+```
++----------+----------+--------+----------+----------+
+| VerMajor | VerMinor | NodeID | NumCaps  | Caps[]   |
+| varint   | varint   | string | varint   | NumCaps× |
++----------+----------+--------+----------+----------+
+```
+
+| Field    | Type   | Description                                                                                                                           |
+|----------|--------|---------------------------------------------------------------------------------------------------------------------------------------|
+| VerMajor | varint | Major protocol version proposed by the sender (e.g., `0` for v0.x).                                                                   |
+| VerMinor | varint | Minor protocol version proposed by the sender (e.g., `1` for v0.1).                                                                   |
+| NodeID   | string | Sender's Node ID. Encoding per §4.2. Opaque to the protocol; interpretation defined by §5 (identity model).                           |
+| NumCaps  | varint | Count of capability entries that follow.                                                                                              |
+| Caps[]   | array  | `NumCaps` capability entries, each encoded per §4.3.                                                                                  |
+
+### 4.2 String encoding
+
+Strings within AIRE frame payloads are encoded as `<length: varint> <bytes: UTF-8>`. The length is the byte count of the UTF-8 representation, not the character count. The empty string is encoded as a single varint of value `0`.
+
+This encoding is used wherever a frame payload field is typed as `string` in this specification.
+
+### 4.3 Capability entry encoding
+
+A capability entry consists of:
+
+```
+<name: string> <version: varint> <required: 1 byte>
+```
+
+| Field    | Description                                                                                                                       |
+|----------|-----------------------------------------------------------------------------------------------------------------------------------|
+| name     | Capability identifier in `reverse-domain.dotted` style, e.g., `core.streaming`, `com.example.budget.v2`. UTF-8.                   |
+| version  | Capability version, varint.                                                                                                       |
+| required | `0x01` if the sender requires the peer to support this capability; `0x00` if optional. Other values MUST be rejected as malformed. |
+
+### 4.4 Version negotiation
+
+Upon receiving the peer's HELLO:
+
+1. **Major version check.** If `peer.VerMajor` does not equal the receiver's major version, the receiver MUST emit ERROR with code `INCOMPATIBLE_VERSION` and close the connection.
+2. **Minor version selection.** The negotiated minor version is `min(local.VerMinor, peer.VerMinor)`. Both peers proceed using the negotiated minor version for the duration of the connection.
+
+### 4.5 Capability negotiation
+
+For each capability advertised by either peer:
+
+- If both peers list the capability and the `version` values match exactly, the capability is **active** for the connection.
+- If a peer lists a capability with `required = 0x01` and the other peer does not list it (or lists it with a non-matching version), the receiver MUST emit ERROR with code `MISSING_REQUIRED_CAPABILITY` and close the connection.
+- Capabilities listed by only one peer with `required = 0x00` are **inactive** for the connection. They MUST NOT cause connection failure.
+
+For v0.1, each capability advertises a single version; multi-version range matching is reserved for future minor versions.
+
+### 4.6 Handshake error codes
+
+| Code   | Name                          | Condition                                                |
+|--------|-------------------------------|----------------------------------------------------------|
+| `0x01` | `INCOMPATIBLE_VERSION`        | Major version mismatch in HELLO.                         |
+| `0x02` | `MISSING_REQUIRED_CAPABILITY` | Peer required a capability the receiver lacks.           |
+| `0x03` | `MALFORMED_FRAME`             | HELLO payload could not be parsed.                       |
+| `0x04` | `PROTOCOL_VIOLATION`          | HELLO was not the first frame, or HELLO was sent twice.  |
+
+These codes are carried in the `code` field of the ERROR frame (defined in §3).
+
+### 4.7 Handshake test vector
+
+A minimal HELLO frame at v0.1 from a node identified as `"node1"`, advertising one required capability `core.streaming` at version 1:
+
+```
+01 00 00 1A
+00 01 05 6E 6F 64 65 31
+01 0E 63 6F 72 65 2E 73 74 72 65 61 6D 69 6E 67 01 01
+```
+
+| Bytes                                     | Field                              |
+|-------------------------------------------|------------------------------------|
+| `01`                                      | Type = HELLO                       |
+| `00`                                      | Flags = 0                          |
+| `00`                                      | OpID = 0 (control stream)          |
+| `1A`                                      | PayloadLen = 26                    |
+| `00`                                      | VerMajor = 0                       |
+| `01`                                      | VerMinor = 1                       |
+| `05`                                      | NodeID length = 5                  |
+| `6E 6F 64 65 31`                          | NodeID = `"node1"`                 |
+| `01`                                      | NumCaps = 1                        |
+| `0E`                                      | `cap[0].name` length = 14          |
+| `63 6F 72 65 2E 73 74 72 65 61 6D 69 6E 67` | `cap[0].name` = `"core.streaming"` |
+| `01`                                      | `cap[0].version` = 1               |
+| `01`                                      | `cap[0].required` = `true` (0x01)  |
+
+Total: 30 bytes.
+
+After a successful handshake, peers MAY open additional QUIC streams to begin operations (§2.4).
 
 ## 5. Identity model
 
