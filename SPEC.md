@@ -351,7 +351,52 @@ After a successful handshake, peers MAY open additional QUIC streams to begin op
 
 ## 5. Identity model
 
-*TODO (v0.2):* DID-based identity. Frames carry signatures bound to the issuer's DID. Identity is per-stream (per-operation), not per-connection — a single connection can carry operations on behalf of many distinct agent identities.
+### 5.1 Identifiers
+
+From v0.2 onward, the `NodeID` field in HELLO (§4.1) carries a **W3C Decentralized Identifier (DID)** as defined by [DID Core 1.0](https://www.w3.org/TR/did-1.0/). The DID is the stable, cryptographically anchored identity of the sender.
+
+For v0.1 only, `NodeID` was opaque UTF-8. From v0.2 onward, receivers MUST validate that `NodeID` parses as a DID per DID Core syntax and MUST emit ERROR with code `MALFORMED_FRAME` (§4.6) on parse failure. v0.1 implementations interoperating with v0.2 nodes SHOULD migrate `NodeID` to a DID.
+
+Identity is bound at the **frame level**, not the **connection level**. A single AIRE connection MAY carry operations on behalf of one or more agent identities; per-Operation identity is asserted by the agent's DID in the INVOKE payload (§3) and verified against signatures introduced in §5.4.
+
+### 5.2 Required DID method support
+
+A conforming AIRE v0.2 implementation MUST support both:
+
+- **`did:web`** — for DNS-rooted, human-administrable identities. See [W3C CCG `did-method-web`](https://w3c-ccg.github.io/did-method-web/).
+- **`did:key`** — for ephemeral, self-asserted, no-DNS-required identities. See [W3C CCG `did-method-key`](https://w3c-ccg.github.io/did-method-key/).
+
+Implementations MAY support additional methods (`did:plc`, `did:ethr`, `did:ion`, …). Methods supported by an implementation MAY be advertised at handshake time as capabilities (§4.5) under the namespace `core.did-method.<methodname>`.
+
+### 5.3 DID resolution
+
+Resolution of a `did:web:<host>[:<port>][:<path-segments>]` proceeds per the `did-method-web` specification:
+
+- `:` separators between path segments map to `/` in the resolution URL.
+- With no path segments, fetch `https://<host>/.well-known/did.json`.
+- With path segments, fetch `https://<host>/<seg1>/<seg2>/.../did.json` (no `.well-known`).
+- A non-default port is conveyed by percent-encoding the colon in the DID: `did:web:example.com%3A8443` → `https://example.com:8443/.well-known/did.json`.
+- HTTPS is mandatory; cleartext fetches MUST fail.
+
+`did:key` resolution is purely algorithmic per `did-method-key` (no network fetch).
+
+### 5.4 Signing and replay protection
+
+*TODO (v0.2):* signature scheme (Ed25519), per-frame signing rules, replay protection. This sub-section is tracked separately from §5.1–§5.3 (which define naming-identity only) and will be filled in before v0.2 is finalized.
+
+### 5.5 Examples
+
+A v0.2 HELLO from a `did:web` node:
+
+```
+NodeID = "did:web:aire.example.com"
+```
+
+A v0.2 HELLO from an ephemeral `did:key` node:
+
+```
+NodeID = "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH"
+```
 
 ## 6. URI scheme
 
@@ -363,7 +408,8 @@ The grammar follows RFC 3986. In ABNF:
 
 ```
 aire-uri    = "aire://" authority [ "/" agent-id [ "/" operation ] ]
-authority   = host [ ":" port ]
+authority   = [ userinfo "@" ] host [ ":" port ]
+userinfo    = 1*( unreserved / pct-encoded / sub-delims )
 host        = <host as defined by RFC 3986 §3.2.2>
 port        = <port as defined by RFC 3986 §3.2.3>
 agent-id    = 1*pchar
@@ -372,6 +418,8 @@ pchar       = <as defined by RFC 3986 §3.3>
 ```
 
 `host` MAY be a DNS name, an IPv4 dotted-quad literal, or a bracketed IPv6 literal. `agent-id` and `operation` are case-sensitive UTF-8 strings, percent-encoded as required by RFC 3986.
+
+When `userinfo` is present, the `userinfo "@" host` substring is a **handle** per §6.8 — a human-readable alias requiring off-wire resolution to a DID before connection. Canonical wire forms (e.g., the `uri` in a DID Document service entry, §6.7) MUST omit `userinfo` and address the resolved endpoint directly. Handles are sugar for documentation and CLI use; they are never authoritative on the wire.
 
 ### 6.2 Default port
 
@@ -403,9 +451,179 @@ Given an `aire://` URI, the connecting peer:
 
 Two AIRE URIs are equivalent if and only if their `host`, `port`, `agent-id`, and `operation` components match after URI normalization (RFC 3986 §6). DNS-name hosts are case-insensitive; `agent-id` and `operation` are case-sensitive.
 
-### 6.6 Future work
+### 6.6 Discovery
 
-Opaque node identifiers (host components without DNS resolution) and a standardized discovery mechanism are reserved for v0.2. v0.1 implementations rely on DNS or IP literals for addressing.
+v0.1 implementations rely on DNS or IP literals for addressing. v0.2 introduces two layered discovery mechanisms on top of §6.1:
+
+- **DID-based discovery** (§6.7): a DID resolves to one or more `aire://` endpoints via an `AIREv1` service entry in the DID Document.
+- **Handle resolution** (§6.8): a human-readable `agent@domain` handle resolves to a DID, then to endpoints via §6.7.
+
+The wire-level URI form in §6.1 is unchanged; §6.7 and §6.8 define how an off-wire identifier (DID or handle) becomes a wire-level URI.
+
+### 6.7 DID Document service entry
+
+An AIRE-addressable DID publishes its wire endpoint via a `service` array entry in its DID Document, of type **`AIREv1`**.
+
+#### 6.7.1 Service entry shape
+
+```json
+{
+  "id":   "<DID>#<fragment>",
+  "type": "AIREv1",
+  "serviceEndpoint": [{
+    "uri":     "<aire-uri>",
+    "accept":  ["aire/v0.2", ...],
+    "agentId": "<agent-id>"
+  }]
+}
+```
+
+| Field             | Required | Description                                                                                                     |
+|-------------------|----------|-----------------------------------------------------------------------------------------------------------------|
+| `type`            | yes      | The exact case-sensitive string `"AIREv1"`.                                                                     |
+| `serviceEndpoint` | yes      | Non-empty array of endpoint objects. The string form (DIDComm v2.0-style) is NOT supported.                     |
+| `…[].uri`         | yes      | An `aire://` URI per §6.1. The host portion is the QUIC endpoint to dial. `userinfo` MUST NOT appear here.      |
+| `…[].accept`      | yes      | Non-empty array of supported AIRE protocol version strings, format `"aire/v<major>.<minor>"`.                   |
+| `…[].agentId`     | no       | The §6.1 `agent-id` when the DID resolves to a single agent. If absent, the resolver supplies it from input.    |
+
+The `accept` array enables off-wire pre-negotiation; it does NOT replace the on-wire HELLO version negotiation (§4.4), which remains authoritative.
+
+A DID Document MAY contain multiple `AIREv1` service entries (e.g., for redundancy across regions). Clients SHOULD attempt them in array order.
+
+> Mediator routing (DIDComm-style `routingKeys`) is reserved for a future AIRE version. v0.2 assumes direct connection.
+
+#### 6.7.2 Registry
+
+A future revision will register `AIREv1` at the [W3C DID Spec Registries](https://www.w3.org/TR/did-spec-registries/), following the precedent of DIDComm Messaging's `DIDCommMessaging` entry. Until that submission lands, the type string is owned by this specification.
+
+#### 6.7.3 Example DID Document
+
+```json
+{
+  "id": "did:web:aire.example.com:agents:summarizer",
+  "service": [{
+    "id":   "did:web:aire.example.com:agents:summarizer#aire-1",
+    "type": "AIREv1",
+    "serviceEndpoint": [{
+      "uri":     "aire://aire.example.com:4433",
+      "accept":  ["aire/v0.2", "aire/v0.1"],
+      "agentId": "summarizer"
+    }]
+  }],
+  "alsoKnownAs": [
+    "aire://summarizer@aire.example.com"
+  ]
+}
+```
+
+### 6.8 Handle resolution
+
+A **handle** is a human-readable, mutable alias for a DID, of the form `<localpart>@<domain>`.
+
+#### 6.8.1 Grammar
+
+```
+handle    = localpart "@" domain
+localpart = 1*( ALPHA / DIGIT / "_" / "-" / "." )
+domain    = <DNS name as defined by RFC 1035>
+```
+
+ASCII-only at v0.2. Internationalized handles (IDN) are reserved for a future revision to defer the homograph-attack surface.
+
+#### 6.8.2 Resolution methods
+
+A client resolving a handle to a DID MUST attempt at least one of the following methods. Implementations SHOULD attempt both in parallel and accept the first valid response.
+
+**Method A — DNS TXT.**
+
+```
+QUERY:    _aire.<localpart>.<domain>  IN  TXT
+RESPONSE: "did=<DID>"
+```
+
+The TXT record value MUST be the exact ASCII string `did=` followed immediately by the DID. If multiple TXT records are returned at the same name, resolution MUST fail.
+
+**Method B — HTTPS well-known.**
+
+```
+GET https://<domain>/.well-known/aire-did?name=<localpart>
+```
+
+Response MUST be `200 OK` with body the bare DID followed by a single `\n` (LF). `Content-Type` is ignored. The query-string form lets a single well-known endpoint serve every agent under a domain. HTTPS is mandatory; cleartext requests MUST fail. The endpoint MUST NOT require CORS; it is a server-to-server resolution.
+
+#### 6.8.3 Bidirectional verification (mandatory)
+
+After a handle resolves to a DID, the client MUST resolve the DID's Document and verify that `alsoKnownAs` contains the handle's URI form:
+
+```
+"aire://<localpart>@<domain>"
+```
+
+If `alsoKnownAs` is absent, empty, or does not contain the handle URI, the handle MUST be treated as invalid for that DID and resolution MUST fail.
+
+This bidirectional binding prevents impersonation: control of the handle's domain is necessary but not sufficient to claim an arbitrary DID. Without the binding, anyone with control of a domain could associate any DID with any handle they served.
+
+#### 6.8.4 End-to-end resolution
+
+```
+Input handle: @summarizer@aire.example.com
+
+1. Resolve handle → DID
+   DNS TXT: _aire.summarizer.aire.example.com
+     → "did=did:web:aire.example.com:agents:summarizer"
+   (or HTTPS: https://aire.example.com/.well-known/aire-did?name=summarizer
+     → "did:web:aire.example.com:agents:summarizer\n")
+
+2. Resolve DID → DID Document
+   GET https://aire.example.com/agents/summarizer/did.json
+
+3. Verify bidirectional binding
+   assert "aire://summarizer@aire.example.com" ∈ document.alsoKnownAs
+   else: FAIL
+
+4. Pick AIREv1 service entry
+   service[type=="AIREv1"].serviceEndpoint[0]
+     → uri "aire://aire.example.com:4433"
+     → agentId "summarizer"
+     → accept ["aire/v0.2", "aire/v0.1"]
+
+5. Connect
+   QUIC dial aire.example.com:4433
+   §4 handshake: HELLO carries our DID; peer HELLO carries the agent's DID
+   INVOKE on agentId "summarizer"
+```
+
+Steps 1–4 are off-wire (DNS / HTTPS). Step 5 is AIRE proper.
+
+#### 6.8.5 Test vectors
+
+Conforming resolvers MUST accept the following triple as a valid resolution of the handle `@summarizer@aire.example.com`.
+
+**TXT record:**
+
+```
+_aire.summarizer.aire.example.com.  IN  TXT  "did=did:web:aire.example.com:agents:summarizer"
+```
+
+**Well-known response body** (43 bytes, ASCII):
+
+```
+64 69 64 3A 77 65 62 3A 61 69 72 65 2E 65 78 61
+6D 70 6C 65 2E 63 6F 6D 3A 61 67 65 6E 74 73 3A
+73 75 6D 6D 61 72 69 7A 65 72 0A
+```
+
+(`did:web:aire.example.com:agents:summarizer\n`.)
+
+**Required `alsoKnownAs` entry in the resolved DID Document:**
+
+```
+"aire://summarizer@aire.example.com"
+```
+
+#### 6.8.6 Security note
+
+Handle ownership equals domain ownership. DNS hijack or TLS compromise on the handle's domain enables handle takeover but, given §6.8.3 verification, does NOT enable impersonation of an existing DID — only creation of a new DID under attacker control. Threat-model details are deferred to §10.
 
 ## 7. Cancellation semantics
 
