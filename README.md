@@ -2,7 +2,7 @@
 
 **Agent Interchange Runtime Envelope** — a QUIC-native protocol for agent-to-agent communication.
 
-> Status: draft v0.1 · Reference implementation: [aire-go](../aire-go)
+> Status: draft, v0.1 shipped · Reference implementation: [aire-go](../aire-go) (conformant against the v0.1 vectors)
 
 ## The bet
 
@@ -37,10 +37,10 @@ See [SPEC.md](./SPEC.md) for the full draft.
 
 ## Status & roadmap
 
-This is **draft v0.1**. Expect breaking changes until v1.0.
+Draft spec. Expect breaking changes until v1.0.
 
-- v0.1 — frame types, handshake, basic semantics *(in progress)*
-- v0.2 — capability negotiation, identity model
+- v0.1 — wire format, handshake, URI scheme, conformance vectors *(shipped — §§2/3/4/6 merged; [aire-go](../aire-go) is green against [vectors/v0.1.json](./vectors/v0.1.json) with a two-node cancel-mid-stream demo)*
+- v0.2 — identity model, capability negotiation, discovery *(in progress — DID identity (did:web, did:key), AIREv1 service entry, and handle resolution landed; capability semantics and per-frame signing still open)*
 - v0.3 — budget / cancel / delegate semantics
 - v0.4 — resumability, multipath
 - v1.0 — frozen wire format, foundation donation
