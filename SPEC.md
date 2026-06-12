@@ -802,15 +802,216 @@ At v0.1, peers MAY cancel an in-flight operation by closing the corresponding QU
 
 Because v0.1 has no in-band CANCEL frame, a peer wishing to cancel one operation but keep the connection open for others simply closes that one stream while leaving the connection's other streams intact. This works correctly under QUIC's stream-per-operation model (§2.4).
 
-### 7.2 v0.3 contract — CANCEL frame (forward reference)
+### 7.2 v0.3 contract — CANCEL frame
 
-*TODO (v0.3):* The `CANCEL` frame (§3) kills a single Operation while keeping its QUIC stream open for any final-state exchange the receiver may emit. If that operation has been delegated (via `DELEGATE`), the cancellation propagates to the delegate. Cancellation is best-effort but must be acknowledged within an implementation-defined deadline.
+CANCEL provides in-band, per-operation cancellation that supersedes the v0.1 stream-close mechanism when the canceller wants to signal *why* the operation is ending and distinguish it from other forms of stream termination. The v0.1 stream-close cancellation (§7.1) remains valid forever — it is the QUIC-native default and any v0.3+ implementation MUST continue to treat unexpected stream termination as cancellation.
 
-The v0.3 CANCEL frame supersedes the v0.1 stream-close mechanism for cases where the canceller wants to signal cancellation reason or distinguish it from other forms of stream termination. The v0.1 stream-close cancellation remains valid forever — it is the QUIC-native default and any v0.3+ implementation MUST continue to treat unexpected stream termination as cancellation.
+On receiving CANCEL for an active operation, a receiver MUST cease work on it, release any resources held on its behalf, and emit a terminal frame (the operation's normal terminal STREAM, or an ERROR with code `CANCELLED` per §7.2.6) before closing the stream's send side.
+
+#### 7.2.1 CANCEL frame payload
+
+```
++--------+-----------+----------+
+| Reason | DetailLen | Detail   |
+| varint | varint    | bytes    |
++--------+-----------+----------+
+```
+
+| Field     | Encoding                                                                                |
+|-----------|-----------------------------------------------------------------------------------------|
+| Reason    | Reason code (§7.2.2), varint.                                                           |
+| DetailLen | Length of Detail in bytes (varint).                                                     |
+| Detail    | Optional UTF-8 human-readable detail. MAY be empty. SHOULD NOT exceed 1024 bytes.       |
+
+For backward compatibility with v0.1: a CANCEL frame with `PayloadLen = 0` (no Reason byte) is a legal "USER_CANCELLED, no detail" form, equivalent to a v0.3 CANCEL with `Reason = 0x00` and `DetailLen = 0`. v0.3 senders SHOULD include the Reason field explicitly; v0.3 receivers MUST accept both forms.
+
+#### 7.2.2 Reason codes
+
+| Code      | Name                 | Meaning                                                            |
+|-----------|----------------------|--------------------------------------------------------------------|
+| `0x00`    | `USER_CANCELLED`     | Caller explicitly cancelled (default when no reason is given).     |
+| `0x01`    | `DEADLINE_EXCEEDED`  | The operation's deadline (§8) has passed.                          |
+| `0x02`    | `BUDGET_EXCEEDED`    | The operation's budget (§8) has been exhausted.                    |
+| `0x03`    | `UPSTREAM_CANCELLED` | A parent operation was cancelled; propagated via §7.2.4.           |
+| `0x04`    | `RESOURCE_EXHAUSTED` | Server-side resource limit (memory, queue depth, …) hit.           |
+| `0x05`    | `INTERNAL`           | Implementation-specific failure ended the operation.               |
+| 0x06–0x3F | reserved             | Reserved for future minor versions.                                |
+| 0x40+     | vendor               | Vendor-defined reasons. MUST be tolerated by receivers.            |
+
+#### 7.2.3 Acknowledgement and timing
+
+- CANCEL is fire-and-forget at the wire level. QUIC's stream ordering guarantees the receiver observes CANCEL after any previously-sent frames on the same operation.
+- A receiver of CANCEL MUST emit a terminal frame for the operation within an implementation-defined deadline. The RECOMMENDED upper bound is **5 seconds**.
+- A canceller SHOULD wait for the terminal frame before considering the operation complete; if no terminal frame arrives within the deadline, the canceller MAY close the stream abruptly (§7.1).
+- A receiver that has already emitted a terminal frame for the operation MUST silently discard a subsequent CANCEL — the operation is already complete.
+
+#### 7.2.4 DELEGATE propagation
+
+When an operation O₁ has been delegated (§3, DELEGATE frame) to a sub-operation O₂, the delegating party MUST propagate cancellation downstream:
+
+- On receiving CANCEL for O₁, the delegator MUST emit CANCEL on O₂'s stream with `Reason = UPSTREAM_CANCELLED`. The Detail field MAY carry O₁'s original Reason and Detail, or any additional context.
+- Propagation is best-effort. The delegator MUST initiate the downstream CANCEL within the §7.2.3 deadline.
+- Propagation is **transitive**: if O₂ itself delegated to O₃, the same rule applies recursively along the chain.
+- A delegator that has already emitted a terminal frame for O₁ and subsequently observes a stale CANCEL MUST still attempt downstream propagation, since O₂ may not yet have completed.
+
+#### 7.2.5 Test vectors
+
+**Vector — CANCEL on operation 5 with reason USER_CANCELLED, no detail:**
+
+```
+05 00 05 02 00 00
+```
+
+| Bytes | Field        |
+|-------|--------------|
+| `05`  | Type = CANCEL |
+| `00`  | Flags = 0    |
+| `05`  | OpID = 5     |
+| `02`  | PayloadLen = 2 |
+| `00`  | Reason = USER_CANCELLED |
+| `00`  | DetailLen = 0 |
+
+**Vector — CANCEL on operation 10 with reason UPSTREAM_CANCELLED, detail "parent: ABORT" (13 bytes UTF-8):**
+
+```
+05 00 0A 0F 03 0D 70 61 72 65 6E 74 3A 20 41 42 4F 52 54
+```
+
+| Bytes        | Field |
+|--------------|-------|
+| `05`         | Type = CANCEL |
+| `00`         | Flags = 0 |
+| `0A`         | OpID = 10 |
+| `0F`         | PayloadLen = 15 |
+| `03`         | Reason = UPSTREAM_CANCELLED |
+| `0D`         | DetailLen = 13 |
+| `70 61 72 65 6E 74 3A 20 41 42 4F 52 54` | `"parent: ABORT"` |
+
+The v0.1 zero-payload CANCEL vector (§2.6 Vector 5) remains valid under §7.2.1's compatibility rule.
+
+#### 7.2.6 Operation error codes
+
+The following codes extend the §4.7 / §5.4.7 error-code registry; they share the same code space and travel in the same `code` field of the ERROR frame.
+
+| Code   | Name                  | Condition                                                                    |
+|--------|-----------------------|------------------------------------------------------------------------------|
+| `0x0A` | `CANCELLED`           | Operation terminated in response to a CANCEL frame.                          |
+| `0x0B` | `BUDGET_EXCEEDED`     | Operation cannot continue without exceeding the §8 BUDGET advertised by the peer. |
+| `0x0C` | `DEADLINE_EXCEEDED`   | Operation cannot continue without exceeding the §8 deadline.                 |
+| `0x0D` | `DELEGATE_FAILED`     | Delegation to a downstream operation failed (see §7.2.4).                    |
 
 ## 8. Budget and backpressure
 
-*TODO (v0.3):* `BUDGET` frames are bidirectional. Senders advertise remaining budget (tokens, dollars, deadline). Receivers MAY refuse work that exceeds advertised budget. Budget is per-Operation, not per-Connection.
+AIRE provides **semantic** backpressure on top of QUIC's byte-level flow control. A peer can declare how many tokens, how much money, and how much wall-clock time an operation may still consume; the other peer MUST honor the declaration. Budget is the actuals-aware counterpart to QUIC's bytes-aware window — they operate independently and both must be satisfied.
+
+### 8.1 BUDGET frame
+
+The BUDGET frame (§3, code `0x06`) carries a snapshot of the budget remaining for an operation. Either peer MAY send it at any time during the operation's lifetime. The frame's OpID identifies the operation it constrains.
+
+BUDGET payload — a length-prefixed sequence of TLV entries:
+
+```
++----------+----------+----------+
+| NumEntry | Entry[0] | Entry[1] | …
+| varint   |          |          |
++----------+----------+----------+
+```
+
+Each entry:
+
+```
++----------+----------+----------+
+| FieldID  | Length   | Value    |
+| 1 byte   | varint   | bytes    |
++----------+----------+----------+
+```
+
+A BUDGET payload MUST contain at least one entry. Multiple entries with the same `FieldID` in a single BUDGET MUST cause the receiver to emit ERROR `MALFORMED_FRAME` (§4.7). Receivers MUST tolerate unknown `FieldID` values by reading `Length` and skipping `Length` bytes — unknown fields do not invalidate the frame.
+
+### 8.2 Defined fields
+
+| Code      | Name                       | Value encoding                                                          |
+|-----------|----------------------------|-------------------------------------------------------------------------|
+| `0x01`    | `TOKENS_REMAINING`         | varint — count of tokens the producer may still emit.                   |
+| `0x02`    | `COST_MICROUNITS_REMAINING`| varint — cost remaining in micro-units of the currency in `0x03` (default USD if `0x03` is absent). |
+| `0x03`    | `CURRENCY`                 | 3-byte ASCII ISO 4217 code (e.g. `"USD"`, `"EUR"`).                     |
+| `0x04`    | `DEADLINE_MS`              | 8-byte big-endian signed int64 — UTC milliseconds at which the operation MUST be terminated. |
+| 0x05–0x7F | reserved                   | Reserved for future minor versions.                                     |
+| 0x80–0xFF | vendor                     | Vendor-defined. Receivers MUST tolerate (skip via `Length`).            |
+
+Implementations MAY emit BUDGET with any subset of fields; missing fields mean "no constraint declared on this dimension." A peer that has not sent BUDGET is treated as having declared no constraints, subject to application-layer policy.
+
+### 8.3 Scope
+
+A BUDGET frame is **per-Operation**: it is sent on the operation's QUIC stream and applies only to that operation. Connection-level budget scope (e.g. "this entire connection has 100K tokens remaining") is reserved for a future minor version; it will be carried in a BUDGET frame with `OpID = 0` (control stream) when defined.
+
+### 8.4 Update rules
+
+- Either peer MAY send BUDGET at any time during the operation. There is no maximum frequency at the protocol level; implementations SHOULD batch updates to avoid wire churn.
+- The **latest** BUDGET received is the authoritative snapshot. Older snapshots are discarded immediately on receipt of a newer one.
+- BUDGET is **absolute, not delta**. Each frame carries the remaining budget, not a change. Senders that wish to delta-encode internally MUST translate to absolutes before emitting.
+- A BUDGET that *increases* any field relative to the previous snapshot is valid — it represents a top-up. A BUDGET that decreases a field is also valid and immediately constrains the receiver.
+
+### 8.5 Refusal and exhaustion
+
+- A peer that has received BUDGET MUST NOT continue work that would exceed the snapshot in any declared dimension.
+- A peer that detects exhaustion (continuing would exceed the snapshot) MUST cease work, emit a terminal frame, and either:
+  - Send CANCEL with the matching reason code (`BUDGET_EXCEEDED` or `DEADLINE_EXCEEDED`, §7.2.2), or
+  - Send ERROR with the matching error code (`BUDGET_EXCEEDED` or `DEADLINE_EXCEEDED`, §7.2.6).
+- After a `BUDGET_EXCEEDED` outcome the sender that originally advertised the budget MAY emit a fresh BUDGET with higher values to grant headroom. If the operation has not yet been terminated by a terminal frame, the receiver MUST re-evaluate against the new snapshot.
+
+### 8.6 Interaction with QUIC flow control
+
+QUIC stream flow control (RFC 9000 §4) is byte-based and operates independently of AIRE BUDGET. Both layers apply concurrently:
+
+- QUIC may stall a stream when the receiver's byte-window closes; AIRE BUDGET is unaffected.
+- BUDGET may cause a producer to stop work even when QUIC has window available. This is the intended semantic: the producer is rate-limited by *what the work means* (tokens, dollars, time) rather than by *how big the bytes are*.
+
+When both layers would stall the producer, the stricter wins. There is no protocol-level coordination between the two; implementations SHOULD report which layer caused a stall in operator-facing telemetry.
+
+### 8.7 Test vectors
+
+**Vector — BUDGET on operation 5 with 1000 tokens remaining, 5000 micro-USD remaining, currency USD:**
+
+```
+06 00 05 0E 03 01 02 43 E8 02 02 53 88 03 03 55 53 44
+```
+
+| Bytes              | Field |
+|--------------------|-------|
+| `06`               | Type = BUDGET |
+| `00`               | Flags = 0 |
+| `05`               | OpID = 5 |
+| `0E`               | PayloadLen = 14 |
+| `03`               | NumEntry = 3 |
+| `01`               | Entry 1 FieldID = TOKENS_REMAINING |
+| `02`               | Entry 1 Length = 2 |
+| `43 E8`            | Entry 1 Value = varint(1000) |
+| `02`               | Entry 2 FieldID = COST_MICROUNITS_REMAINING |
+| `02`               | Entry 2 Length = 2 |
+| `53 88`            | Entry 2 Value = varint(5000) |
+| `03`               | Entry 3 FieldID = CURRENCY |
+| `03`               | Entry 3 Length = 3 |
+| `55 53 44`         | Entry 3 Value = `"USD"` |
+
+**Vector — BUDGET on operation 7 with deadline 2026-12-31T23:59:59.999Z (UTC ms = 1798761599999 = `0x000001A2CE8BD3FF`):**
+
+```
+06 00 07 0B 01 04 08 00 00 01 A2 CE 8B D3 FF
+```
+
+| Bytes                          | Field |
+|--------------------------------|-------|
+| `06`                           | Type = BUDGET |
+| `00`                           | Flags = 0 |
+| `07`                           | OpID = 7 |
+| `0B`                           | PayloadLen = 11 |
+| `01`                           | NumEntry = 1 |
+| `04`                           | Entry 1 FieldID = DEADLINE_MS |
+| `08`                           | Entry 1 Length = 8 |
+| `00 00 01 A2 CE 8B D3 FF`      | Entry 1 Value = int64 BE = 1798761599999 |
+
+Both vectors are published in machine-readable form at [`vectors/v0.3.json`](./vectors/v0.3.json). Implementations MUST round-trip them byte-for-byte.
 
 ## 9. Resumability
 
