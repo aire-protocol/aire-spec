@@ -818,7 +818,99 @@ The v0.3 CANCEL frame supersedes the v0.1 stream-close mechanism for cases where
 
 ## 10. Security considerations
 
-*TODO:* Threat model, replay protection, authentication, authorization, capability-scoped tokens, denial-of-service resistance.
+This section catalogs the threats AIRE's protocol-level mechanisms address, the threats it explicitly does not address, and the deployment-level assumptions implementations must hold. References point back to the normative section that defines each defense; §10 does not introduce new wire behavior.
+
+### 10.1 Threat model
+
+AIRE assumes a network attacker capable of observing, modifying, dropping, replaying, and injecting packets on the path between peers. AIRE does **not** assume the attacker controls the QUIC TLS root store, the DID resolution endpoints (DNS, HTTPS), or either peer's host. An attacker who compromises either peer's host cannot be defended against at the protocol layer.
+
+The protocol explicitly does not provide:
+
+- **Authorization.** What an authenticated peer is permitted to do is an application concern.
+- **Audit / non-repudiation as an archival format.** Signatures (§5.4) cover individual frames; the spec defines no long-term attestation format.
+- **Anonymity.** AIRE peers always carry an addressable identity (DID + endpoint) on the wire; AIRE is not an anonymity network.
+- **Confidentiality beyond QUIC's.** Frame contents are protected only by the QUIC TLS session; once decrypted at either endpoint, content is plaintext to the application.
+
+### 10.2 Transport security
+
+QUIC (RFC 9000) mandates TLS 1.3 for connection establishment; AIRE inherits this and does **not** define a second transport-layer security mechanism.
+
+- Implementations MUST verify the server's certificate against a configured trust root. The trust root is a deployment choice (Web PKI, private CA, key pinning); AIRE does not constrain it.
+- For `did:web` resolution (§5.3) and handle resolution (§6.8.2), HTTPS is mandatory — cleartext fetches MUST fail.
+- QUIC connection-ID migration MUST preserve the established TLS session; there is no "fresh handshake on migration" exposure.
+
+### 10.3 Identity spoofing
+
+A node's claimed identity is the `NodeID` field in HELLO (§4.1, §5.1). From v0.2 onward, `NodeID` is a DID and HELLO MUST be signed (§5.4.5). The signature binds HELLO bytes to the DID's verification key; an attacker who does not control the DID's private key cannot impersonate the node. A v0.2 receiver of an unsigned HELLO MUST reject it with `BAD_SIGNATURE` (§5.4.7).
+
+`did:web` identity binding rests on DNS + HTTPS to the DID Document host. An attacker controlling both can substitute a verification key and impersonate the DID — this is the Web PKI trust assumption. Operators of high-value `did:web` identities SHOULD pin keys out of band or use a DID method (`did:key`, `did:plc`, …) that removes the DNS operator from the trust path.
+
+`did:key` is algorithmic and not exposed to DNS hijack, but a `did:key` does not rotate — a leaked private key is a permanent compromise of that identity.
+
+v0.1 has no signing primitive; v0.1 deployments wishing to authenticate peers MUST add an out-of-protocol mechanism (see Appendix A.2). v0.1 ↔ v0.1 connections without such a mechanism authenticate the peer's QUIC transport but not the agent identity claimed in HELLO.
+
+### 10.4 Replay
+
+Three replay surfaces:
+
+1. **Within-connection.** Prevented by QUIC's stream ordering and TLS counters; impossible at the wire layer.
+2. **Cross-frame, same signing key.** Prevented by the §5.4.4 domain separator binding a signature to a single frame type.
+3. **Cross-connection.** Prevented by §5.4.6 — every signed frame carries a fresh nonce and a recent timestamp; receivers maintain a `(DID, nonce)` cache within the 300-second freshness window.
+
+A network attacker who captures a v0.2 signed HELLO cannot replay it on a fresh connection more than 300 seconds later (timestamp window) and cannot replay it on the same connection (QUIC ordering). Deployments with tighter clock sync MAY shorten the window; loosening it widens the attacker's surface and is NOT RECOMMENDED.
+
+Capability entries and the negotiated active set (§4.5.4) live inside the HELLO whose signature covers them, so capability advertisements cannot be tampered with in transit when signing is in use.
+
+### 10.5 Handle and DID hijack
+
+Handles (§6.8) are mutable aliases for DIDs and are rooted in the handle domain's DNS + HTTPS. A network attacker who controls the handle domain can cause a new handle to resolve to an attacker-controlled DID, or cause an existing handle to resolve to an attacker-controlled DID.
+
+The §6.8.3 bidirectional binding (`alsoKnownAs` in the resolved DID Document MUST contain the handle's URI) prevents the *existing-DID* hijack: the attacker can claim a fresh DID under their own control but cannot hijack the binding of an established DID without also compromising that DID's Document.
+
+DID hijack — taking over an established DID — is method-specific:
+
+- `did:web` is vulnerable to combined DNS + TLS compromise of the Document host. Operators SHOULD use registrar locking, DNSSEC where deployable, and certificate-transparency monitoring.
+- `did:key` cannot be hijacked but can be permanently compromised by private-key loss; rotation requires issuing a new DID.
+
+Implementations SHOULD honor the `Cache-Control` directives of the HTTPS response for `did:web`; aggressive over-caching widens the window during which a stale Document with a revoked key remains accepted.
+
+### 10.6 Capability and authorization
+
+A capability (§4.5) advertises that a feature is *supported*. It is not a permission token. Specifically:
+
+- An advertised capability does not grant the peer the right to use it; authorization is an application concern.
+- Required capabilities (`required = 0x01`) force connection-level agreement on a feature, not on its use against any particular Operation.
+- The capability registry (§4.6) and capability names (§4.5.1) are public; learning that a peer advertises `aire.foo/1` is not a confidentiality breach.
+
+Implementations MUST NOT use capability presence as the sole authorization signal for sensitive operations. Use the authenticated DID plus out-of-band policy.
+
+### 10.7 Denial of service
+
+QUIC provides baseline DoS resistance — address validation, retry tokens, amplification limits — that AIRE inherits. AIRE adds the following surfaces:
+
+- **HELLO signature verification.** Ed25519 verification is cheap (≈50 µs on modern CPUs) but unbounded inbound HELLOs from random peers still constitute a CPU drain. Implementations SHOULD rate-limit unauthenticated inbound connections per source address.
+- **DID resolution.** A malicious HELLO carrying a `did:web` value can force the receiver to make an HTTPS request. Implementations MUST cache resolved DID Documents (respecting Cache-Control) and SHOULD rate-limit resolution per source.
+- **Stream amplification.** A peer opening many concurrent streams forces the receiver to allocate per-stream state. QUIC's `MAX_STREAMS` transport parameter (RFC 9000 §4.6) is the primary control; implementations MUST set a finite limit and MAY lower it under load.
+- **Replay-cache memory.** The §5.4.6 `(DID, nonce)` cache is bounded by the freshness window times nonce arrival rate. Implementations SHOULD bound cache memory per DID and evict FIFO; under attack, exceeding the bound MUST cause `REPLAYED_NONCE` rejection rather than uncontrolled memory growth.
+- **Budget exhaustion (v0.3, forward reference).** §8 (BUDGET) lets a peer claim budget; a misbehaving peer claiming effectively infinite budget can drive the producer into uncapped work. Production deployments MUST cap accepted budgets at the application layer regardless of advertised values.
+
+### 10.8 Observability and side channels
+
+Frame envelopes (§2.1) leak frame types, OpIDs, and payload lengths to a network observer of the QUIC cipher-text layer. An attacker observing traffic patterns can infer:
+
+- The rate and burst pattern of operations on a connection.
+- Approximate payload sizes (which correlate with LLM turn boundaries or tool-call shapes).
+
+Padding and traffic shaping are out of scope for v0.x. Deployments concerned about traffic analysis SHOULD layer that on at the application layer or via QUIC transport parameters.
+
+ERROR codes related to authentication and key resolution (§5.4.7) SHOULD be returned without further distinguishing detail in production — e.g. a receiver SHOULD NOT separately signal "this DID does not exist" vs. "this DID has a different key" beyond what the four codes `BAD_SIGNATURE`, `UNRESOLVABLE_DID`, `KEY_MISMATCH`, and `STALE_TIMESTAMP` already encode, since finer-grained signals aid enumeration attacks.
+
+### 10.9 Open security work
+
+- **§7.2 (v0.3) CANCEL frame** exposes a small "did this cancellation arrive?" timing signal; threat is minor (cancellation is application-observable anyway) and will be reviewed when §7.2 is normalized.
+- **§8 (v0.3) BUDGET frames** add the budget-exhaustion surface (§10.7) and will need their own threat-model elaboration when normalized.
+- **§9 (v0.4) Resumability** introduces a long-lived resumption token whose theft would permit operation hijack; v0.4 will specify token entropy and validation requirements.
+- Formal protocol analysis (e.g. Tamarin, ProVerif) of §5.4 signing + §4 handshake against an active network attacker is targeted before v1.0; it is not part of the v0.2 deliverable.
 
 ## 11. Versioning
 
