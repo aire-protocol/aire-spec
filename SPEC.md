@@ -846,3 +846,48 @@ Receivers MAY surface these values for audit, chargeback, or analytics. Protocol
 This recommendation is intentionally orthogonal to BUDGET (§8): a receiver may observe BUDGET frames advertising what was allowed without ever receiving an `accounting` object, and may receive an `accounting` object on an operation that never advertised a budget. The two together let a peer reconcile commitments against actuals end-to-end without inventing a third channel.
 
 The encoding of `accounting` within a frame payload is left to the application — JSON, CBOR, protobuf, or another scheme negotiated out of band. A future minor version may promote this to a normative payload field once production deployment confirms the shape.
+
+### A.2 Authentication on a v0.1 connection
+
+At v0.1, NodeID is opaque UTF-8 and frames are unsigned; there is no protocol-level authentication primitive. v0.2 supersedes this with DIDs (§5) and Ed25519 HELLO signing (§5.4). Implementations still operating over a v0.1 wire format — for instance, a stable runtime that has not yet migrated its peer set — need *some* way to authenticate the peer on the other end of a HELLO. Absent guidance, every v0.1 implementer will roll their own incompatible variant. This appendix documents one workable pattern; it is **non-normative** and explicitly **superseded by §5 + §5.4 once v0.2 is reachable**.
+
+#### A.2.1 Capability-gated auth handshake
+
+Both peers advertise a custom capability (under a namespace they control per §4.5.1) with `required = 0x01`. A typical name is `com.example.shared-secret/1`. Because the bit is required, an unauthenticated peer that omits the capability fails the §4.5 active-set check and the connection closes before any operation can run. The capability advertises the *intent* to authenticate; the actual handshake runs in a dedicated post-handshake operation.
+
+Sketch:
+
+```
+1. QUIC connect → AIRE §4 handshake.
+   Both peers' HELLOs include {com.example.shared-secret/1, required: true}.
+   §4.5 negotiation succeeds → both sides know auth is expected.
+
+2. The initiating peer opens an Operation against the well-known agent
+   "_aire/auth" with operation name "challenge".
+
+3. The acceptor returns, in a STREAM frame, a fresh 16-byte nonce and an
+   8-byte timestamp.
+
+4. The initiator returns, in a STREAM frame:
+       HMAC-SHA256(shared_secret,
+                   peer_node_id || nonce || timestamp || direction)
+   where direction is a single byte distinguishing initiator-MAC from
+   acceptor-MAC. The same exchange runs symmetrically (acceptor → initiator)
+   to mutually authenticate.
+
+5. Both sides verify the HMAC. On success, the connection is marked
+   authenticated; both sides accept subsequent INVOKE frames. On failure,
+   either side MUST emit ERROR and close the connection.
+```
+
+#### A.2.2 Replay protection
+
+- The acceptor MUST reject a `timestamp` outside a ±5-minute (300 s) freshness window relative to its UTC clock.
+- The acceptor MUST cache `(peer_node_id, nonce)` pairs seen within the window and reject repeats.
+- The shared secret MUST be at least 256 bits and exchanged out of band (operator-administered).
+
+#### A.2.3 Migration path to v0.2
+
+Implementations adopting v0.2 SHOULD drop this pattern in favor of §5.4 HELLO signing, which provides equivalent (and stronger) per-frame identity verification at the protocol level and removes the need for a post-handshake auth round-trip. A v0.2 peer connecting to a v0.1 peer that still advertises a shared-secret capability MAY continue to honor it for compatibility during the transition; once both ends are on v0.2 the capability MUST be dropped.
+
+The exact HMAC inputs, nonce length, freshness window, and capability namespace are implementation choices. The interop-relevant decisions documented here are (a) that the existing `required` flag of §4.3 is the right signal to commit both sides to running an auth exchange, and (b) that the exchange itself runs as a normal Operation, since v0.1 capability entries carry no payload room for inline challenge bytes.
