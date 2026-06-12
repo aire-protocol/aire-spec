@@ -704,3 +704,26 @@ Handle ownership equals domain ownership. DNS hijack or TLS compromise on the ha
 ## 11. Versioning
 
 AIRE uses semantic versioning at the protocol level. Wire-incompatible changes bump the major version. Capability-additive changes bump the minor version. A node MUST refuse a `HELLO` from an incompatible major version.
+
+## Appendix A — Non-normative recommendations
+
+The recommendations in this appendix are **non-normative**. Protocol behavior MUST NOT depend on compliance with them; they exist to give implementations a shared shape for adjacent concerns that are out of scope for the wire protocol itself.
+
+### A.1 Operation cost accounting
+
+§8 (BUDGET, v0.3) covers *prospective* accounting — declaring what an operation is allowed to consume. *Retrospective* accounting — recording what an operation actually consumed — has no wire-level convention in v0.2. To reduce ad-hoc divergence between implementations building audit logs, chargeback, or marketplace settlement, the following shape is RECOMMENDED.
+
+When an operation's work has a meaningful unit cost (LLM tokens, compute time, paid API calls, …), the producing peer SHOULD include an `accounting` object in the operation's terminal frame payload (a final STREAM, or an ERROR frame) with the following keys, omitting any that do not apply:
+
+| Key           | Type                                              | Meaning                                                  |
+|---------------|---------------------------------------------------|----------------------------------------------------------|
+| `tokens_in`   | unsigned integer                                  | Input tokens consumed.                                   |
+| `tokens_out`  | unsigned integer                                  | Output tokens produced.                                  |
+| `cost`        | object `{ amount: number, currency: string }`     | Monetary cost. `currency` is an ISO 4217 code.           |
+| `duration_ms` | unsigned integer                                  | Wall-clock duration of the operation in milliseconds.    |
+
+Receivers MAY surface these values for audit, chargeback, or analytics. Protocol behavior MUST NOT depend on them — they are informational.
+
+This recommendation is intentionally orthogonal to BUDGET (§8): a receiver may observe BUDGET frames advertising what was allowed without ever receiving an `accounting` object, and may receive an `accounting` object on an operation that never advertised a budget. The two together let a peer reconcile commitments against actuals end-to-end without inventing a third channel.
+
+The encoding of `accounting` within a frame payload is left to the application — JSON, CBOR, protobuf, or another scheme negotiated out of band. A future minor version may promote this to a normative payload field once production deployment confirms the shape.
