@@ -588,6 +588,8 @@ domain    = <DNS name as defined by RFC 1035>
 
 ASCII-only at v0.2. Internationalized handles (IDN) are reserved for a future revision to defer the homograph-attack surface.
 
+The canonical **display form** of a handle prepends a single `@` to the grammar above — `@summarizer@aire.example.com` — mirroring fediverse and atproto convention. The leading `@` disambiguates a handle from an email address or bare DNS label in UX surfaces (CLI prompts, documentation, copy-paste flows) and is RECOMMENDED whenever a handle is rendered for human consumption. The leading `@` is not part of the grammar; tools normalizing user input MUST strip exactly one leading `@` if present before applying the grammar, and MUST NOT strip more than one. On the wire, handles never appear at all — only the resolved DID and `aire://` URI do (see §6.1 and §6.7).
+
 #### 6.8.2 Resolution methods
 
 A client resolving a handle to a DID MUST attempt at least one of the following methods. Implementations SHOULD attempt both in parallel and accept the first valid response.
