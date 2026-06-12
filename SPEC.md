@@ -796,7 +796,17 @@ Handle ownership equals domain ownership. DNS hijack or TLS compromise on the ha
 
 ## 7. Cancellation semantics
 
-*TODO (v0.3):* `CANCEL` frame kills a single Operation. If that operation has been delegated (via `DELEGATE`), the cancellation propagates to the delegate. Cancellation is best-effort but must be acknowledged within an implementation-defined deadline.
+### 7.1 v0.1 contract — stream close as cancellation
+
+At v0.1, peers MAY cancel an in-flight operation by closing the corresponding QUIC stream — either gracefully (FIN before the operation's terminal frame) or abruptly (`STREAM_RESET`). A receiver observing unexpected stream termination for an active OpID MUST treat it as cancellation of that operation and abort the associated work, releasing any resources held on its behalf. No CANCEL frame is required at v0.1; the QUIC stream lifetime is the operation's lifetime, and closing the stream is the only cancellation primitive.
+
+Because v0.1 has no in-band CANCEL frame, a peer wishing to cancel one operation but keep the connection open for others simply closes that one stream while leaving the connection's other streams intact. This works correctly under QUIC's stream-per-operation model (§2.4).
+
+### 7.2 v0.3 contract — CANCEL frame (forward reference)
+
+*TODO (v0.3):* The `CANCEL` frame (§3) kills a single Operation while keeping its QUIC stream open for any final-state exchange the receiver may emit. If that operation has been delegated (via `DELEGATE`), the cancellation propagates to the delegate. Cancellation is best-effort but must be acknowledged within an implementation-defined deadline.
+
+The v0.3 CANCEL frame supersedes the v0.1 stream-close mechanism for cases where the canceller wants to signal cancellation reason or distinguish it from other forms of stream termination. The v0.1 stream-close cancellation remains valid forever — it is the QUIC-native default and any v0.3+ implementation MUST continue to treat unexpected stream termination as cancellation.
 
 ## 8. Budget and backpressure
 
