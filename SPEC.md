@@ -242,8 +242,10 @@ Every implementation MUST round-trip every vector byte-for-byte. New vectors are
 | 0x07 | DELEGATE    | server → client | Forward an Operation to another Node                       |
 | 0x08 | ERROR       | both            | Typed error frame (rate limit, budget, auth, etc.)         |
 | 0x09 | GOODBYE     | both            | Graceful shutdown                                          |
+| 0x0A | RESUMABLE   | server → client | Issue a resumption token for an in-flight Operation (§9.2) |
+| 0x0B | RESUME      | client → server | Re-establish an Operation after connection loss (§9.3)     |
 
-Frame code `0x02` is reserved for a future mid-connection capability-update mechanism; v0.2 implementations MUST treat a received `0x02` frame as a protocol violation (see §4.5.5). Codes `0x0A–0x7F` are reserved for future versions of this specification. Codes `0x80–0xFF` are reserved for vendor extensions.
+Frame code `0x02` is reserved for a future mid-connection capability-update mechanism; v0.2 implementations MUST treat a received `0x02` frame as a protocol violation (see §4.5.5). Codes `0x0C–0x7F` are reserved for future versions of this specification. Codes `0x80–0xFF` are reserved for vendor extensions.
 
 ## 4. Handshake
 
@@ -363,6 +365,7 @@ This specification defines the following capabilities under the reserved `aire.`
 |---------------------------|------------|------------------------------------------------------------------------------------------------------------------|
 | `aire.did-method.web/1`   | §5.2       | Resolution of `did:web` NodeIDs. Mandatory to implement (§5.2); advertisement is optional and informational.     |
 | `aire.did-method.key/1`   | §5.2       | Resolution of `did:key` NodeIDs. Mandatory to implement (§5.2); advertisement is optional and informational.     |
+| `aire.resumable/1`        | §9         | Both peers advertise to allow RESUMABLE / RESUME frames on the connection. Optional; required for any resumable operation. |
 
 Additional standard capabilities will be registered here as future minor versions of this specification land. Capabilities defined by parties other than this specification MUST be named under a namespace they control (§4.5.1) and MUST NOT use the `aire.` prefix.
 
@@ -1015,7 +1018,149 @@ Both vectors are published in machine-readable form at [`vectors/v0.3.json`](./v
 
 ## 9. Resumability
 
-*TODO (v0.4):* Operations may be resumable across connection loss. Resumable operations carry a resumption token issued by the server in `INVOKE` ACK. Client may reconnect (possibly to a different node via DNS-level migration) and present the resumption token to continue.
+An operation is **resumable** if its server-to-client output can survive connection loss: the client can dial a fresh QUIC connection, present a token issued earlier, and continue receiving output from the point it stopped. v0.4 covers the server-to-client direction only; bidirectional resumability (client-to-server data also surviving) is reserved for a future minor version.
+
+### 9.1 Negotiation
+
+Resumability is opt-in via the capability `aire.resumable/1` (§4.6). Both peers MUST advertise it for any RESUMABLE or RESUME frame to be sent on the connection. A peer that receives a RESUMABLE or RESUME frame when `aire.resumable/1` is not in the active set (§4.5.4) MUST emit ERROR `PROTOCOL_VIOLATION` (§4.7) and close the connection.
+
+### 9.2 RESUMABLE frame (code `0x0A`)
+
+Direction: **server → client** (the operation responder offers a token to the operation initiator).
+
+Payload:
+
+```
++----------+-----------+----------+----------+
+| TTLSecs  | TokenLen  | Token    | LastSeq  |
+| varint   | varint    | bytes    | varint   |
++----------+-----------+----------+----------+
+```
+
+| Field    | Encoding                                                                                       |
+|----------|------------------------------------------------------------------------------------------------|
+| TTLSecs  | varint. Server's commitment to retain operation state at least this long, in seconds.          |
+| TokenLen | varint. Length of Token in bytes.                                                              |
+| Token    | Opaque bytes the client stores and presents on resume.                                         |
+| LastSeq  | varint. Highest sequence number the server has produced for this operation. `0` if none.       |
+
+A server MAY emit RESUMABLE multiple times during an operation — to refresh the TTL, update LastSeq, or rotate the token. The latest RESUMABLE supersedes any previous.
+
+The Token is opaque to the protocol. It MAY encode routing information so a future minor version can resume across nodes; v0.4 assumes the client reconnects to a host that can validate the original Token.
+
+### 9.3 RESUME frame (code `0x0B`)
+
+Direction: **client → server**. Sent as the *first* frame on a new operation stream after a fresh §4 handshake, in lieu of INVOKE.
+
+Payload:
+
+```
++-----------+----------+-----------+
+| TokenLen  | Token    | LastRecv  |
+| varint    | bytes    | varint    |
++-----------+----------+-----------+
+```
+
+| Field    | Encoding                                                                                        |
+|----------|-------------------------------------------------------------------------------------------------|
+| TokenLen | varint. Length of Token in bytes.                                                               |
+| Token    | The Token bytes previously received in a RESUMABLE.                                             |
+| LastRecv | varint. Highest sequence number the client successfully received. Server resumes at LastRecv+1. |
+
+On receiving RESUME, the server:
+
+1. Validates the Token. If unrecognized, emits ERROR `RESUME_INVALID` (§9.7) and closes the stream.
+2. Confirms the TTL has not elapsed. If expired, emits ERROR `RESUME_EXPIRED` (§9.7) and closes the stream.
+3. Resumes the operation: emits STREAM frames starting at sequence number LastRecv+1, plus any terminal frame the original operation produced.
+4. MAY immediately issue a fresh RESUMABLE on the new stream so the client has an up-to-date token if the new connection also drops.
+
+### 9.4 Sequence numbers
+
+The "sequence number" referenced in RESUMABLE.LastSeq and RESUME.LastRecv is the **count** of server-to-client STREAM frames emitted for the operation, starting at 1 for the first STREAM frame. It is **not** carried in STREAM frame payloads — both peers maintain it as a side counter:
+
+- Server: increments its counter immediately *after* successfully writing each STREAM frame to the stream.
+- Client: increments its counter immediately *after* successfully reading each STREAM frame from the stream.
+
+QUIC's reliable ordering within a connection guarantees the two counters agree at any point until the connection drops. On reconnect, LastRecv tells the server where to pick up.
+
+Non-STREAM frames (CANCEL, BUDGET, RESUMABLE, ERROR, GOODBYE) do **not** advance the counter. They are connection-scoped or operation-control and are not replayed on resume.
+
+### 9.5 Delivery semantics
+
+Resume is **at-least-once** by default. A server that has emitted STREAM N but is uncertain whether the client received it (because the connection dropped) SHOULD re-emit STREAM N on the resume stream. Applications that require at-most-once semantics MUST add idempotency at the application layer (e.g., dedup keys in the STREAM payload).
+
+A server MAY truncate retained output to a sliding window for memory reasons. If the client's LastRecv is older than the server's earliest retained frame, the server MUST emit ERROR `RESUME_UNAVAILABLE` (§9.7) and close the stream.
+
+### 9.6 State retention
+
+- A server that issues a RESUMABLE with TTLSecs = T MUST retain enough state to resume the operation for at least T seconds from the moment the RESUMABLE was sent.
+- After the TTL, the server MAY discard state. A subsequent RESUME with that token MUST be rejected with `RESUME_EXPIRED`.
+- The server MAY extend the TTL by emitting a fresh RESUMABLE before the original elapses.
+- A server that completes the operation (emits a terminal frame) MAY retain state until the TTL even after completion, so a client reconnecting after a clean shutdown can still fetch any output it missed.
+
+### 9.7 Error codes
+
+The following codes extend the §4.7 / §5.4.7 / §7.2.6 ERROR-frame registry.
+
+| Code   | Name                  | Condition                                                              |
+|--------|-----------------------|------------------------------------------------------------------------|
+| `0x0E` | `RESUME_INVALID`      | Token does not match any retained operation on this server.            |
+| `0x0F` | `RESUME_EXPIRED`      | Token's TTL has elapsed; server has discarded state.                   |
+| `0x10` | `RESUME_UNAVAILABLE`  | LastRecv is below the server's earliest retained STREAM; cannot resume. |
+
+### 9.8 Cross-node resumption
+
+A resumption Token MAY be honored by a different node than the one that issued it, if the server-side implementation uses shared state across nodes or the Token encodes routing information. Clients MUST treat Tokens as opaque and MUST NOT attempt to parse them.
+
+A node that receives a RESUME for a Token it does not recognize MUST emit `RESUME_INVALID`. Hint frames pointing the client at a different node (e.g., via a redirect) are not defined at v0.4 and are reserved for a future version.
+
+### 9.9 Test vectors
+
+**Vector — RESUMABLE on operation 7 with TTL 600s, 16-byte token `"AIRE-RSM-0000001"`, LastSeq 42:**
+
+```
+0A 00 07 14 42 58 10 41 49 52 45 2D 52 53 4D 2D 30 30 30 30 30 30 31 2A
+```
+
+| Bytes                                                | Field                              |
+|------------------------------------------------------|------------------------------------|
+| `0A`                                                 | Type = RESUMABLE                   |
+| `00`                                                 | Flags = 0                          |
+| `07`                                                 | OpID = 7                           |
+| `14`                                                 | PayloadLen = 20                    |
+| `42 58`                                              | TTLSecs varint = 600               |
+| `10`                                                 | TokenLen = 16                      |
+| `41 49 52 45 2D 52 53 4D 2D 30 30 30 30 30 30 31`    | Token = `"AIRE-RSM-0000001"` (16 bytes) |
+| `2A`                                                 | LastSeq = 42                       |
+
+**Vector — RESUME on operation 9 with the same 16-byte token, LastRecv 3:**
+
+```
+0B 00 09 12 10 41 49 52 45 2D 52 53 4D 2D 30 30 30 30 30 30 31 03
+```
+
+| Bytes                                                | Field                              |
+|------------------------------------------------------|------------------------------------|
+| `0B`                                                 | Type = RESUME                      |
+| `00`                                                 | Flags = 0                          |
+| `09`                                                 | OpID = 9                           |
+| `12`                                                 | PayloadLen = 18                    |
+| `10`                                                 | TokenLen = 16                      |
+| `41 49 52 45 2D 52 53 4D 2D 30 30 30 30 30 30 31`    | Token = `"AIRE-RSM-0000001"` (16 bytes) |
+| `03`                                                 | LastRecv = 3                       |
+
+Machine-readable form at [`vectors/v0.4.json`](./vectors/v0.4.json).
+
+### 9.10 Security considerations
+
+A resumption Token is a bearer credential for the operation's output. Anyone possessing it can fetch the remaining STREAM frames the server would have sent. Therefore:
+
+- Servers MUST generate Tokens from a cryptographically secure random source with **at least 128 bits of entropy**. Counters or predictable IDs MUST NOT be used.
+- Servers SHOULD rotate the Token on each RESUMABLE emission (rather than reusing it), so a stolen Token becomes useless once the next RESUMABLE has been received by the client.
+- Servers SHOULD invalidate a Token after a successful RESUME consumes it — issuing a fresh Token in the resumed stream rather than honoring the old one a second time. This prevents fork attacks where two clients race to resume the same operation.
+- A Token's TTL bounds the window during which a stolen Token is useful. Operators handling sensitive operations SHOULD configure TTLs conservatively.
+
+Transport confidentiality is provided by QUIC TLS (§10.2), which protects Tokens from passive observers on the wire. A Token compromise implies a host-side compromise (client storage, server log, intermediate proxy) — out of scope for the protocol layer but worth surfacing in deployment runbooks.
 
 ## 10. Security considerations
 
@@ -1110,7 +1255,7 @@ ERROR codes related to authentication and key resolution (§5.4.7) SHOULD be ret
 
 - **§7.2 (v0.3) CANCEL frame** exposes a small "did this cancellation arrive?" timing signal; threat is minor (cancellation is application-observable anyway) and will be reviewed when §7.2 is normalized.
 - **§8 (v0.3) BUDGET frames** add the budget-exhaustion surface (§10.7) and will need their own threat-model elaboration when normalized.
-- **§9 (v0.4) Resumability** introduces a long-lived resumption token whose theft would permit operation hijack; v0.4 will specify token entropy and validation requirements.
+- **§9 (v0.4) Resumability** Token theft permits output hijack; §9.10 specifies entropy (≥128 bits), rotation on each RESUMABLE, and one-shot consumption.
 - Formal protocol analysis (e.g. Tamarin, ProVerif) of §5.4 signing + §4 handshake against an active network attacker is targeted before v1.0; it is not part of the v0.2 deliverable.
 
 ## 11. Versioning

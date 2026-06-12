@@ -1,0 +1,44 @@
+{
+  "version": "v0.4",
+  "spec": "SPEC.md §9.9",
+  "description": "Canonical wire-format test vectors for the v0.4 RESUMABLE and RESUME frames. Implementations MUST round-trip every vector byte-for-byte.",
+  "vectors": [
+    {
+      "id": "resumable-op7",
+      "section": "§9.9 vector 1",
+      "description": "RESUMABLE on operation 7 with TTL 600s, 16-byte token \"AIRE-RSM-0000001\", LastSeq 42",
+      "encoded_hex": "0a000714425810414952452d52534d2d303030303030312a",
+      "frame": {
+        "type": 10,
+        "type_name": "RESUMABLE",
+        "flags": 0,
+        "op_id": 7,
+        "payload_hex": "425810414952452d52534d2d303030303030312a"
+      },
+      "decoded": {
+        "ttl_secs": 600,
+        "token_ascii": "AIRE-RSM-0000001",
+        "token_hex": "414952452d52534d2d30303030303031",
+        "last_seq": 42
+      }
+    },
+    {
+      "id": "resume-op9",
+      "section": "§9.9 vector 2",
+      "description": "RESUME on operation 9 with the same 16-byte token, LastRecv 3",
+      "encoded_hex": "0b00091210414952452d52534d2d3030303030303103",
+      "frame": {
+        "type": 11,
+        "type_name": "RESUME",
+        "flags": 0,
+        "op_id": 9,
+        "payload_hex": "10414952452d52534d2d3030303030303103"
+      },
+      "decoded": {
+        "token_ascii": "AIRE-RSM-0000001",
+        "token_hex": "414952452d52534d2d30303030303031",
+        "last_recv": 3
+      }
+    }
+  ]
+}

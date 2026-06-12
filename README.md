@@ -41,8 +41,8 @@ Draft spec. Expect breaking changes until v1.0.
 
 - v0.1 — wire format, handshake, URI scheme, conformance vectors *(shipped — §§2/3/4/6 merged; [aire-go](../aire-go) is green against [vectors/v0.1.json](./vectors/v0.1.json) with a two-node cancel-mid-stream demo)*
 - v0.2 — identity model, capability negotiation, discovery *(shipped — DID identity (did:web, did:key), AIREv1 service entry, handle resolution, capability negotiation semantics, and Ed25519 HELLO signing with replay protection; conformance vectors at [vectors/v0.2.json](./vectors/v0.2.json))*
-- v0.3 — budget / cancel / delegate semantics *(spec shipped — §7.2 CANCEL frame, DELEGATE propagation, §8 BUDGET with TLV payload, refusal/exhaustion error codes; conformance vectors at [vectors/v0.3.json](./vectors/v0.3.json). Reference impl follows.)*
-- v0.4 — resumability, multipath
+- v0.3 — budget / cancel / delegate semantics *(spec shipped — §7.2 CANCEL frame, DELEGATE propagation, §8 BUDGET with TLV payload, refusal/exhaustion error codes; conformance vectors at [vectors/v0.3.json](./vectors/v0.3.json))*
+- v0.4 — resumability, multipath *(spec shipped — §9 RESUMABLE / RESUME frames, opaque tokens with TTL, server-side sequence numbers, at-least-once delivery, §9.10 security; conformance vectors at [vectors/v0.4.json](./vectors/v0.4.json). Multipath deferred.)*
 - v1.0 — frozen wire format, foundation donation
 
 ## Governance
