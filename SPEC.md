@@ -2,7 +2,7 @@
 
 > **Author:** Etienne de Bruin ([@etdebruin](https://github.com/etdebruin)).
 > **Status:** Draft. Breaking changes expected until v1.0.
-> **Last updated:** 2026-04-27.
+> **Last updated:** 2026-06-12.
 
 ## 1. Introduction
 
@@ -90,7 +90,7 @@ Connection-level frames (HELLO, GOODBYE; OpID = 0) travel on a dedicated control
 
 ### 2.5 Maximum frame size
 
-Implementations MUST accept frames whose PayloadLen is up to 65 536 bytes (2¹⁶) without prior negotiation. Implementations MAY accept larger frames; senders SHOULD NOT exceed 1 048 576 bytes (2²⁰) without first negotiating a higher `max_frame_size` capability via CAPABILITY (§4). Receivers MAY emit ERROR with code `FRAME_TOO_LARGE` if a received frame exceeds their configured limit.
+Implementations MUST accept frames whose PayloadLen is up to 65 536 bytes (2¹⁶) without prior negotiation. Implementations MAY accept larger frames; senders SHOULD NOT exceed 1 048 576 bytes (2²⁰) without first negotiating a higher limit via a capability (§4.5). No such capability is defined in this revision; future minor versions may register one in §4.6. Receivers MAY emit ERROR with code `FRAME_TOO_LARGE` if a received frame exceeds their configured limit.
 
 ### 2.6 Test vectors
 
@@ -205,7 +205,7 @@ Total: 11 bytes.
 
 ### 2.7 Machine-readable test vectors
 
-A canonical JSON representation of every vector in §2.6 (and §4.7) is published at [`vectors/v0.1.json`](./vectors/v0.1.json) in this repository. Conformance suites SHOULD load this file directly rather than re-encoding the hex tables above. The JSON schema:
+A canonical JSON representation of every vector in §2.6 (and §4.8) is published at [`vectors/v0.1.json`](./vectors/v0.1.json) in this repository. Conformance suites SHOULD load this file directly rather than re-encoding the hex tables above. The JSON schema:
 
 ```json
 {
@@ -235,7 +235,6 @@ Every implementation MUST round-trip every vector byte-for-byte. New vectors are
 | Code | Name        | Direction       | Purpose                                                    |
 |------|-------------|-----------------|------------------------------------------------------------|
 | 0x01 | HELLO       | both            | Initial handshake — Node ID, version, supported capabilities |
-| 0x02 | CAPABILITY  | both            | Capability advertisement and negotiation                   |
 | 0x03 | INVOKE      | client → server | Begin an Operation on a target Agent                       |
 | 0x04 | STREAM      | both            | Streamed payload data for an active Operation              |
 | 0x05 | CANCEL      | both            | Cancel a specific Operation (propagates to delegated sub-ops) |
@@ -244,13 +243,13 @@ Every implementation MUST round-trip every vector byte-for-byte. New vectors are
 | 0x08 | ERROR       | both            | Typed error frame (rate limit, budget, auth, etc.)         |
 | 0x09 | GOODBYE     | both            | Graceful shutdown                                          |
 
-Frame codes 0x80+ reserved for vendor extensions; 0x10–0x7F reserved for future versions.
+Frame code `0x02` is reserved for a future mid-connection capability-update mechanism; v0.2 implementations MUST treat a received `0x02` frame as a protocol violation (see §4.5.5). Codes `0x0A–0x7F` are reserved for future versions of this specification. Codes `0x80–0xFF` are reserved for vendor extensions.
 
 ## 4. Handshake
 
 Every AIRE connection begins with a HELLO exchange on the *control stream*. The control stream is the first client-initiated bidirectional QUIC stream (stream ID `0` under QUIC's standard stream-ID numbering, RFC 9000 §2.1). Both peers MUST send exactly one HELLO frame as the first frame on the control stream, before sending any other frame on any stream.
 
-A peer MUST NOT send a second HELLO on the same connection. A second HELLO MUST be treated as a protocol violation: the receiver emits ERROR with code `PROTOCOL_VIOLATION` (§4.6) and closes the connection.
+A peer MUST NOT send a second HELLO on the same connection. A second HELLO MUST be treated as a protocol violation: the receiver emits ERROR with code `PROTOCOL_VIOLATION` (§4.7) and closes the connection.
 
 ### 4.1 HELLO frame payload
 
@@ -300,28 +299,87 @@ Upon receiving the peer's HELLO:
 
 ### 4.5 Capability negotiation
 
-For each capability advertised by either peer:
+Capabilities declared in HELLO announce features the sender supports or requires. Negotiation produces an **active capability set** that both peers respect for the lifetime of the connection. The procedure on receiving the peer's HELLO is:
 
-- If both peers list the capability and the `version` values match exactly, the capability is **active** for the connection.
-- If a peer lists a capability with `required = 0x01` and the other peer does not list it (or lists it with a non-matching version), the receiver MUST emit ERROR with code `MISSING_REQUIRED_CAPABILITY` and close the connection.
-- Capabilities listed by only one peer with `required = 0x00` are **inactive** for the connection. They MUST NOT cause connection failure.
+1. Validate each capability entry's syntax (§4.5.1). A malformed entry MUST cause ERROR `MALFORMED_FRAME` (§4.7) and close the connection.
+2. Identify matching capabilities. Two entries refer to the same capability if and only if their full `name` fields (including the `/<major>` suffix per §4.5.1) are byte-for-byte equal. Different majors of the same namespace are different capabilities.
+3. Compute the active set (§4.5.4). For each name advertised by *both* peers, the negotiated minor version is `min(local.minor, peer.minor)`.
+4. Enforce required entries (§4.5.3). If either peer advertised a name with `required = 0x01` and that name is not in the active set, the receiver MUST emit ERROR `MISSING_REQUIRED_CAPABILITY` (§4.7) and close the connection.
 
-For v0.1, each capability advertises a single version; multi-version range matching is reserved for future minor versions.
+After step 4 completes without error, the active set is fixed for the connection (§4.5.5).
 
-### 4.6 Handshake error codes
+#### 4.5.1 Naming
+
+Capability names take the form `<namespace>/<major>`:
+
+```
+capability-name = namespace "/" major
+namespace       = label *("." label)
+label           = ALPHA *(ALPHA / DIGIT / "-")
+major           = 1*DIGIT                ; no leading zeros except "0"
+```
+
+- `namespace` SHOULD be a reverse-DNS identifier the sender controls (e.g. `com.example.feature`). Reverse-DNS allocation is self-administered; no central registry is required for third-party capabilities.
+- Names whose `namespace` begins with `aire.` (i.e. the first label is exactly `aire`) are **reserved** for capabilities defined in this specification. Implementations other than this specification MUST NOT advertise capabilities under the `aire.` namespace. Capabilities defined by this specification are listed in §4.6.
+- `major` is a decimal integer without leading zeros, except that `0` MAY be used to mark experimental, pre-stable capabilities. Stable capabilities SHOULD begin at major `1`.
+- The byte length of `name` (the full `<namespace>/<major>` string, UTF-8) MUST NOT exceed 255 bytes.
+- Senders MUST emit names that conform to this grammar. Receivers MUST accept any UTF-8 byte sequence in the `name` field of a capability entry (§4.3): names that do not conform to the grammar are treated as unrecognized — they cannot match anything in the peer's advertisement and so will not appear in the active set. Such names still participate in the `required` check of §4.5.3.
+
+#### 4.5.2 Versioning
+
+A capability's identity has two parts: the **major** version embedded in the `name` (§4.5.1) and the **minor** version carried in the `version` field of the capability entry (§4.3).
+
+- Different majors are different capabilities. `com.example.foo/1` and `com.example.foo/2` MUST NOT match.
+- Within a given major, minor versions are **additive**: a sender advertising minor `N` MUST behave compatibly with every minor `0..N` of the same major.
+- Both peers MUST operate at the negotiated minor `min(local.minor, peer.minor)`. A peer MUST NOT use functionality introduced in a minor higher than the negotiated minor.
+- A peer that requires a specific minor's behavior MAY advertise that minor with `required = 0x01`; this only ensures the name+major is in the active set. If the negotiated minor is lower than the advertiser needs, the advertiser MUST decline to use the functionality and SHOULD close the connection at the application layer rather than transmit frames that depend on it.
+- An implementation MAY advertise multiple majors of the same namespace in one HELLO (e.g. both `com.example.foo/1` and `com.example.foo/2`), in which case each major participates in negotiation independently.
+
+#### 4.5.3 Required vs optional
+
+The `required` byte (§4.3) declares whether the *advertising* peer needs the *receiving* peer to support the same name+major.
+
+- `required = 0x01` — the advertiser cannot operate without the peer also advertising this name+major. If the peer did not advertise a matching name, the receiver MUST emit ERROR `MISSING_REQUIRED_CAPABILITY` and close the connection.
+- `required = 0x00` — the advertiser will use the capability if the peer also advertised it, but will continue otherwise.
+- Either peer setting `required = 0x01` is sufficient to fail negotiation when the other peer has not advertised the name. The check is symmetric: each peer evaluates the other's `required` entries against its own advertisement list.
+- A name advertised by both peers with conflicting `required` values is still in the active set; the connection does not fail solely because the bits disagree.
+
+#### 4.5.4 Active capability set
+
+Both peers compute the same active set after negotiation: every `(name, negotiated-minor)` pair where `name` was advertised by both peers. The set is invariant for the lifetime of the connection. All protocol behavior conditioned on capabilities MUST consult the active set rather than raw HELLO contents.
+
+- The order of capability entries in HELLO is **not** semantically significant. Senders SHOULD emit entries in lexical order of `name` to ease debugging; receivers MUST accept any order.
+- A single HELLO MUST NOT contain two entries with the same full `name` (i.e. same namespace and same major). A receiver detecting a duplicate MUST emit ERROR `MALFORMED_FRAME` (§4.7) and close the connection. Multiple majors of the same namespace are distinct names and so are permitted.
+
+#### 4.5.5 Mid-connection updates
+
+v0.2 does not permit changes to the active capability set after the handshake. The set computed in §4.5.4 is the set for the connection's lifetime. Frame code `0x02` is reserved (§3) for a mid-connection update mechanism to be defined in a future minor version; a v0.2 receiver encountering a frame of type `0x02` MUST emit ERROR `PROTOCOL_VIOLATION` (§4.7) and close the connection.
+
+### 4.6 Standard capabilities
+
+This specification defines the following capabilities under the reserved `aire.` namespace. Implementations MAY advertise them in HELLO to signal support to a peer. Advertisement is optional; the capabilities listed here that have mandatory behavior elsewhere in the spec remain mandatory regardless of whether they are advertised.
+
+| Capability                | Defined in | Notes                                                                                                            |
+|---------------------------|------------|------------------------------------------------------------------------------------------------------------------|
+| `aire.did-method.web/1`   | §5.2       | Resolution of `did:web` NodeIDs. Mandatory to implement (§5.2); advertisement is optional and informational.     |
+| `aire.did-method.key/1`   | §5.2       | Resolution of `did:key` NodeIDs. Mandatory to implement (§5.2); advertisement is optional and informational.     |
+
+Additional standard capabilities will be registered here as future minor versions of this specification land. Capabilities defined by parties other than this specification MUST be named under a namespace they control (§4.5.1) and MUST NOT use the `aire.` prefix.
+
+### 4.7 Handshake error codes
 
 | Code   | Name                          | Condition                                                |
 |--------|-------------------------------|----------------------------------------------------------|
 | `0x01` | `INCOMPATIBLE_VERSION`        | Major version mismatch in HELLO.                         |
 | `0x02` | `MISSING_REQUIRED_CAPABILITY` | Peer required a capability the receiver lacks.           |
 | `0x03` | `MALFORMED_FRAME`             | HELLO payload could not be parsed.                       |
-| `0x04` | `PROTOCOL_VIOLATION`          | HELLO was not the first frame, or HELLO was sent twice.  |
+| `0x04` | `PROTOCOL_VIOLATION`          | HELLO was not the first frame, HELLO was sent twice, or a reserved frame code (e.g. `0x02`) was received. |
 
 These codes are carried in the `code` field of the ERROR frame (defined in §3).
 
-### 4.7 Handshake test vector
+### 4.8 Handshake test vector
 
-A minimal HELLO frame at v0.1 from a node identified as `"node1"`, advertising one required capability `core.streaming` at version 1:
+A minimal HELLO frame at v0.1 from a node identified as `"node1"`, advertising one required capability `core.streaming` at version 1. The capability name in this vector predates the v0.2 naming convention (§4.5.1) and is preserved here for v0.1 conformance; v0.2+ senders MUST use the `<namespace>/<major>` form, and MUST NOT advertise capabilities under the reserved `aire.` namespace unless this specification defines them in §4.6.
 
 ```
 01 00 00 1A
@@ -355,7 +413,7 @@ After a successful handshake, peers MAY open additional QUIC streams to begin op
 
 From v0.2 onward, the `NodeID` field in HELLO (§4.1) carries a **W3C Decentralized Identifier (DID)** as defined by [DID Core 1.0](https://www.w3.org/TR/did-1.0/). The DID is the stable, cryptographically anchored identity of the sender.
 
-For v0.1 only, `NodeID` was opaque UTF-8. From v0.2 onward, receivers MUST validate that `NodeID` parses as a DID per DID Core syntax and MUST emit ERROR with code `MALFORMED_FRAME` (§4.6) on parse failure. v0.1 implementations interoperating with v0.2 nodes SHOULD migrate `NodeID` to a DID.
+For v0.1 only, `NodeID` was opaque UTF-8. From v0.2 onward, receivers MUST validate that `NodeID` parses as a DID per DID Core syntax and MUST emit ERROR with code `MALFORMED_FRAME` (§4.7) on parse failure. v0.1 implementations interoperating with v0.2 nodes SHOULD migrate `NodeID` to a DID.
 
 Identity is bound at the **frame level**, not the **connection level**. A single AIRE connection MAY carry operations on behalf of one or more agent identities; per-Operation identity is asserted by the agent's DID in the INVOKE payload (§3) and verified against signatures introduced in §5.4.
 
@@ -366,7 +424,7 @@ A conforming AIRE v0.2 implementation MUST support both:
 - **`did:web`** — for DNS-rooted, human-administrable identities. See [W3C CCG `did-method-web`](https://w3c-ccg.github.io/did-method-web/).
 - **`did:key`** — for ephemeral, self-asserted, no-DNS-required identities. See [W3C CCG `did-method-key`](https://w3c-ccg.github.io/did-method-key/).
 
-Implementations MAY support additional methods (`did:plc`, `did:ethr`, `did:ion`, …). Methods supported by an implementation MAY be advertised at handshake time as capabilities (§4.5) under the namespace `core.did-method.<methodname>`.
+Implementations MAY support additional methods (`did:plc`, `did:ethr`, `did:ion`, …). Methods defined by *this specification* are advertised under the reserved namespace `aire.did-method.<methodname>/<major>` and listed in §4.6. Methods defined by *other parties* MUST use a namespace the implementer controls (§4.5.1).
 
 ### 5.3 DID resolution
 

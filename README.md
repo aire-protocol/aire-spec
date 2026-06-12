@@ -26,7 +26,7 @@ QUIC fixed the transport. AIRE fixes the semantics on top: connection IDs that s
 ## Design at a glance
 
 - **Transport:** QUIC (RFC 9000)
-- **Frames:** typed agent verbs — `HELLO`, `CAPABILITY`, `INVOKE`, `STREAM`, `CANCEL`, `BUDGET`, `DELEGATE`, `ERROR`, `GOODBYE`
+- **Frames:** typed agent verbs — `HELLO`, `INVOKE`, `STREAM`, `CANCEL`, `BUDGET`, `DELEGATE`, `ERROR`, `GOODBYE`
 - **Identity:** DID-based, signed, bound to streams
 - **Addressing:** `aire://node-id/agent-id/operation`
 - **Backpressure:** semantic — tokens and dollars, not bytes
@@ -40,7 +40,7 @@ See [SPEC.md](./SPEC.md) for the full draft.
 Draft spec. Expect breaking changes until v1.0.
 
 - v0.1 — wire format, handshake, URI scheme, conformance vectors *(shipped — §§2/3/4/6 merged; [aire-go](../aire-go) is green against [vectors/v0.1.json](./vectors/v0.1.json) with a two-node cancel-mid-stream demo)*
-- v0.2 — identity model, capability negotiation, discovery *(in progress — DID identity (did:web, did:key), AIREv1 service entry, and handle resolution landed; capability semantics and per-frame signing still open)*
+- v0.2 — identity model, capability negotiation, discovery *(in progress — DID identity (did:web, did:key), AIREv1 service entry, handle resolution, and capability negotiation semantics (naming, versioning, active set) landed; per-frame signing still open)*
 - v0.3 — budget / cancel / delegate semantics
 - v0.4 — resumability, multipath
 - v1.0 — frozen wire format, foundation donation
