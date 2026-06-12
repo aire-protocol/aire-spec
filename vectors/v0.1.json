@@ -1,6 +1,6 @@
 {
   "version": "v0.1",
-  "spec": "SPEC.md §2.6 + §4.7",
+  "spec": "SPEC.md §2.6 + §4.8",
   "description": "Canonical wire-format test vectors. Implementations MUST round-trip every vector byte-for-byte.",
   "vectors": [
     {
@@ -83,7 +83,7 @@
     },
     {
       "id": "hello-with-capability",
-      "section": "§4.7",
+      "section": "§4.8",
       "description": "HELLO from node 'node1' advertising one required capability 'core.streaming' v1",
       "encoded_hex": "0100001a0001056e6f646531010e636f72652e73747265616d696e670101",
       "frame": {

@@ -440,7 +440,116 @@ Resolution of a `did:web:<host>[:<port>][:<path-segments>]` proceeds per the `di
 
 ### 5.4 Signing and replay protection
 
-*TODO (v0.2):* signature scheme (Ed25519), per-frame signing rules, replay protection. This sub-section is tracked separately from §5.1–§5.3 (which define naming-identity only) and will be filled in before v0.2 is finalized.
+AIRE v0.2 defines a frame-level signature mechanism that lets the receiver of selected frames cryptographically verify the sender controls the DID it claims. At v0.2, only HELLO is mandated to carry a signature; the wire format and verification rules are designed to extend to INVOKE, DELEGATE, and other frames in later minor versions without revisiting primitives.
+
+#### 5.4.1 Algorithm
+
+At v0.2, the sole signature algorithm is **Ed25519** (RFC 8032). Other algorithms are reserved. Algorithm identifiers are 1-byte codes:
+
+| Code   | Algorithm   |
+|--------|-------------|
+| `0x01` | Ed25519     |
+| others | reserved    |
+
+#### 5.4.2 Key resolution
+
+To verify a signature claimed by DID `D` and verification-method identifier `M`:
+
+1. Resolve `D` to its DID Document (§5.3 for `did:web`; algorithmic for `did:key`).
+2. Locate the verification method whose `id` equals `M` in the Document's `verificationMethod` array.
+3. The verification method MUST be of type `Ed25519VerificationKey2020`. Decode its `publicKeyMultibase` (per the W3C Multikey conventions) to obtain the raw 32-byte Ed25519 public key.
+
+If any step fails — DID unresolvable, method missing, type mismatch, decode failure — the receiver MUST emit ERROR `UNRESOLVABLE_DID` (§5.4.7) and close the connection.
+
+For `did:key`, the DID itself encodes the public key directly; `M` is the canonical fragment form `<DID>#<multibase-identifier>` and resolution is purely local (no network fetch).
+
+#### 5.4.3 Signature block
+
+A signature appears in a frame's payload as a **signature block** appended after the frame's normal payload contents. The block layout:
+
+```
++--------+----------+----------+-----------+---------+----------+
+| AlgID  | VMID     | Nonce    | Timestamp | SigLen  | SigBytes |
+| 1 byte | string   | 16 bytes | 8 bytes   | varint  | bytes    |
++--------+----------+----------+-----------+---------+----------+
+```
+
+| Field     | Encoding                                                                                              |
+|-----------|-------------------------------------------------------------------------------------------------------|
+| AlgID     | 1-byte algorithm identifier (§5.4.1).                                                                 |
+| VMID      | Verification-method identifier in DID URL fragment form (e.g. `did:web:example.com#key-1`). UTF-8 string per §4.2. |
+| Nonce     | Exactly 16 random bytes. Each signed frame MUST use a fresh nonce.                                    |
+| Timestamp | Signed 64-bit two's-complement big-endian integer: Unix milliseconds at signing time.                 |
+| SigLen    | varint length of `SigBytes` in bytes.                                                                 |
+| SigBytes  | Algorithm-defined signature bytes. For Ed25519, exactly 64 bytes.                                     |
+
+The block immediately follows the frame's domain-defined payload contents; the frame envelope's `PayloadLen` (§2.1) covers both the inner payload and the signature block. A receiver detects the block's presence by the frame's signing rules (§5.4.5) and by the presence of bytes remaining in the payload after parsing the inner payload.
+
+#### 5.4.4 Signed message
+
+The byte sequence over which the signature is computed (and verified) is:
+
+```
+domain_separator || inner_payload || meta
+```
+
+Where:
+
+- `domain_separator` is the 13-byte sequence `"AIRE-SIG-v1\x00"` (12 bytes ASCII plus a NUL) concatenated with the 1-byte frame Type (§2.1, §3). This prevents a signature collected from one frame type being replayed against another.
+- `inner_payload` is the bytes of the frame's payload *preceding* the signature block (i.e. the v0.1-style payload for HELLO).
+- `meta` is the byte-for-byte serialization of `AlgID || encoded(VMID) || Nonce || Timestamp` exactly as it appears in the signature block, up to but not including `SigLen`. A verifier reconstructs `meta` by reading those fields directly from the block before checking the signature.
+
+`SigLen` and `SigBytes` are *not* part of the signed material.
+
+#### 5.4.5 Frame-specific signing rules
+
+For v0.2:
+
+| Frame      | Block presence  | Verification                                                                       |
+|------------|-----------------|------------------------------------------------------------------------------------|
+| HELLO      | MUST (v0.2+)    | The DID portion of `VMID` MUST be byte-for-byte equal to the HELLO's `NodeID`.    |
+| INVOKE     | reserved (v0.3) | —                                                                                  |
+| DELEGATE   | reserved (v0.3) | —                                                                                  |
+| CANCEL     | MAY             | If present, the DID portion of `VMID` MUST equal the issuing peer's `NodeID`.      |
+| Other      | MAY             | Application-defined.                                                               |
+
+A v0.2 HELLO without a signature block MUST be rejected with ERROR `BAD_SIGNATURE` (§5.4.7). If the connection's negotiated minor (§4.4) is `0` — i.e. the peer is v0.1 — the HELLO follows the v0.1 format with no signature block, and v0.2 verification rules do not apply. Because the negotiated minor is not known when constructing one's own HELLO, a v0.2 implementation MUST include a signature block in its HELLO unconditionally; a v0.1 peer will fail to parse the trailing bytes and the resulting interop failure is acceptable. For HELLO, `inner_payload` is the entire v0.1-style HELLO payload (`VerMajor || VerMinor || NodeID || NumCaps || Caps[]`, §4.1).
+
+If the VMID-DID equality check fails for HELLO or CANCEL, the receiver MUST emit ERROR `KEY_MISMATCH` (§5.4.7).
+
+#### 5.4.6 Replay protection
+
+Three classes of replay are addressed:
+
+1. **Cross-frame replay** — a signature from one frame type being reused on another. Prevented by `domain_separator` in §5.4.4.
+2. **Within-connection replay** — generally impossible: QUIC streams are reliable and ordered, so the same frame cannot be delivered twice. Implementations MAY treat a duplicate signature within a single connection as a protocol violation.
+3. **Cross-connection replay** — addressed by `Nonce` and `Timestamp`:
+   - `Timestamp` MUST be within ±300 seconds (5 minutes) of the receiver's UTC clock. Outside that window: ERROR `STALE_TIMESTAMP` (§5.4.7).
+   - The receiver MUST maintain a cache of `(signing-DID, Nonce)` pairs seen within the past 300 seconds. A repeat: ERROR `REPLAYED_NONCE` (§5.4.7). Implementations SHOULD bound cache memory; a per-DID FIFO of the most recently seen nonces within the window is sufficient.
+
+Implementations are responsible for clock sync (NTP or equivalent). Wide skew between peers manifests as `STALE_TIMESTAMP` and is a deployment concern, not a protocol bug.
+
+#### 5.4.7 Error codes
+
+The following codes extend the §4.7 handshake-error registry. They share the same code space; ERROR frames carry them in the same `code` field.
+
+| Code   | Name                | Condition                                                                |
+|--------|---------------------|--------------------------------------------------------------------------|
+| `0x05` | `BAD_SIGNATURE`     | Signature failed to verify, or required signature block was missing.     |
+| `0x06` | `STALE_TIMESTAMP`   | Timestamp outside the ±300-second window.                                |
+| `0x07` | `REPLAYED_NONCE`    | `(DID, Nonce)` pair seen previously within the replay window.            |
+| `0x08` | `UNRESOLVABLE_DID`  | DID could not be resolved, or its verification method was not usable.    |
+| `0x09` | `KEY_MISMATCH`      | VMID's DID does not match the identity the frame is meant to assert.     |
+
+#### 5.4.8 Test vector
+
+A canonical signed-HELLO test vector is published at [`vectors/v0.2.json`](./vectors/v0.2.json). The vector includes:
+
+- A fixed Ed25519 secret seed (and the corresponding `did:key` DID and public key).
+- A v0.2 HELLO carrying that DID, one required capability (`aire.did-method.key/1`), a fixed 16-byte nonce, a fixed timestamp, and the resulting signature.
+- The exact byte sequence covered by Ed25519 (domain separator + inner payload + meta) so implementations can verify or regenerate the signature without rebuilding it from scratch.
+
+Conforming v0.2 implementations MUST verify the vector successfully and MUST reject a tampered copy (any single-bit alteration anywhere in the signed region).
 
 ### 5.5 Examples
 
